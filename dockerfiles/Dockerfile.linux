@@ -1,0 +1,56 @@
+# Linux build + test image for glove.
+#
+# Used to validate the Linux container spawner from a macOS host (Docker
+# Desktop / colima / Apple's `container` CLI). The image installs libseccomp
+# and a recent clang + libc++, builds glove with the `asan` preset, and runs
+# the test suite inside the container.
+#
+# Run from the repo root:
+#   docker build -f dockerfiles/Dockerfile.linux -t glove-linux .
+#   docker run --rm --privileged --security-opt seccomp=unconfined glove-linux
+#
+# `seccomp=unconfined` is needed because Docker's default seccomp profile
+# blocks the `clone3(2)` syscall, which the Phase 5.4 spawner uses to create
+# its user/mount/pid/net/ipc/uts namespaces. `--privileged` (or at minimum
+# `--cap-add=SYS_ADMIN`) is needed because Phase 5.5 calls `pivot_root` and
+# bind-mounts a minimal rootfs into a fresh tmpfs. Production deployments
+# can run glove directly on the Linux host (no nested containerisation) and
+# need only the host kernel's standard rootless-userns surface.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        clang-18 clang-format-18 clang-tidy-18 lld-18 \
+        libclang-rt-18-dev \
+        cmake ninja-build pkg-config \
+        libc++-18-dev libc++abi-18-dev \
+        libseccomp-dev \
+        git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make clang-18 the default compiler. Symlinks keep `clang` and friends on
+# PATH so CMake's auto-detection works without per-step CC/CXX overrides.
+RUN ln -sf /usr/bin/clang-18 /usr/local/bin/clang \
+ && ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++ \
+ && ln -sf /usr/bin/clang-format-18 /usr/local/bin/clang-format \
+ && ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy
+
+ENV CC=clang
+ENV CXX=clang++
+ENV CXXFLAGS="-stdlib=libc++"
+ENV LDFLAGS="-stdlib=libc++ -fuse-ld=lld"
+
+WORKDIR /glove
+COPY . .
+
+# Configure + build under the asan preset. Tests under TSan are gated by a
+# follow-up step in CI — keeps the local Docker iteration fast.
+RUN cmake --preset asan && cmake --build --preset asan
+
+# CTest runs with a parent process in the container cgroup, so the cgroup test
+# correctly reports "not delegated" there. After the suite, `exec` replaces
+# the shell as PID 1 and gives the enforcement test an exclusive delegated
+# cgroup, matching the production service topology.
+CMD ["bash", "-lc", "ctest --preset asan --output-on-failure && exec /glove/build/asan/tests/container_linux_cgroup_v2_test"]

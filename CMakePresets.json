@@ -1,0 +1,84 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "_base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Debug, no sanitizers (fast iteration)",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "GLOVE_SANITIZER": "none",
+        "GLOVE_WARNINGS_AS_ERRORS": "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "RelWithDebInfo + AddressSanitizer + UBSan",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "GLOVE_SANITIZER": "address+undefined",
+        "GLOVE_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "RelWithDebInfo + ThreadSanitizer",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "GLOVE_SANITIZER": "thread",
+        "GLOVE_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "relwithdebinfo",
+      "displayName": "RelWithDebInfo (perf testing)",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "GLOVE_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "GLOVE_WARNINGS_AS_ERRORS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev",            "configurePreset": "dev" },
+    { "name": "asan",           "configurePreset": "asan" },
+    { "name": "tsan",           "configurePreset": "tsan" },
+    { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo" },
+    { "name": "release",        "configurePreset": "release" }
+  ],
+  "testPresets": [
+    {
+      "name": "_test_base",
+      "hidden": true,
+      "output": { "outputOnFailure": true, "verbosity": "default" },
+      "execution": { "stopOnFailure": false, "noTestsAction": "error" }
+    },
+    { "name": "dev",            "configurePreset": "dev",            "inherits": "_test_base" },
+    { "name": "asan",           "configurePreset": "asan",           "inherits": "_test_base" },
+    { "name": "tsan",           "configurePreset": "tsan",           "inherits": "_test_base" },
+    { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo", "inherits": "_test_base" },
+    { "name": "release",        "configurePreset": "release",        "inherits": "_test_base" }
+  ]
+}

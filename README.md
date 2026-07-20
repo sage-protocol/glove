@@ -1,0 +1,111 @@
+# Glove
+
+Glove runs an LLM agent inside an OS-enforced sandbox and mediates its tool
+access. Files and inherited environment variables are denied unless the operator
+grants them explicitly.
+
+> Status: research prototype. Remote Sage launch remains disabled until the
+> public lifecycle, approval, and resource-enforcement contracts are complete.
+
+## Security model
+
+Glove contains the agent process rather than operating only as a network proxy.
+
+```text
+host
+├── Glove control, policy, and audit
+├── sandbox
+│   └── agent
+└── approved MCP upstreams
+```
+
+On Linux, the sandbox combines user, PID, network, mount, IPC, and UTS
+namespaces with `pivot_root`, bind mounts, and seccomp. On macOS, Glove applies
+a deny-default Sandbox Profile Language policy before launch. The contained
+process receives a minimal environment and only configured filesystem grants.
+
+Glove does not prevent prompt injection, misuse of an allowed tool, compromise
+of an unsandboxed upstream tool server, same-user host tampering, or kernel
+exploitation. See [the threat model](docs/threat-model.md) for assumptions and
+residual risks.
+
+## Build and test
+
+Requirements:
+
+- CMake 3.28 or newer
+- Ninja
+- Clang 18 or newer
+- Linux: libseccomp development headers
+- macOS integration tests: `yams`
+
+Run the complete local gate:
+
+```sh
+./scripts/preflight.sh
+```
+
+For faster development:
+
+```sh
+cmake --preset dev
+cmake --build --preset dev
+ctest --preset dev
+```
+
+Linux isolation tests can run in the provided container:
+
+```sh
+docker build -f dockerfiles/Dockerfile.linux -t glove-linux .
+docker run --rm --privileged --security-opt seccomp=unconfined glove-linux
+```
+
+## Run modes
+
+`glove run` contains an agent and exposes only allow-listed MCP tools:
+
+```sh
+./build/dev/src/glove run \
+  --upstream yams=yams,serve,--quiet \
+  --allow yams.mcp.echo \
+  -- ./build/dev/src/container/glove_synthetic_agent --mode=client
+```
+
+`glove exec` contains a direct agent process without attaching the MCP kernel:
+
+```sh
+mkdir -p /tmp/glove-work
+./build/dev/src/glove exec \
+  --workspace /tmp/glove-work \
+  -- /absolute/path/to/agent --version
+```
+
+`gloved` is an owner-local control service for plan validation, durable session
+state, authenticated receipt delivery, and a Linux managed-session lifecycle.
+Sage remote launch remains gated on independent direct-write consent,
+prompt-library expansion, and production service integration.
+
+```sh
+./build/dev/src/gloved \
+  --runtime-dir /absolute/owner-only/runtime \
+  --audit-key /absolute/owner-only/audit.key \
+  --journal /absolute/owner-only/receipts.journal \
+  --session-policy /absolute/owner-only/session-policy.json \
+  --session-store /absolute/owner-only/sessions.journal \
+  --materialization-root /absolute/owner-only/materializations \
+  --library-bundle-root /absolute/owner-only/sage-library-bundles
+```
+
+## Documentation
+
+- [Architecture](docs/architecture.md): process boundaries and request flow
+- [Session policy](docs/session-policy.md): canonical plan and local policy contract
+- [Threat model](docs/threat-model.md): guarantees, assumptions, and residual risk
+- [Quickstart](docs/quickstart.md): build and invocation examples
+- [Future work](docs/future-work.md): prioritized launch and hardening gates
+- [Credits](CREDITS.md): dependencies and research references
+
+## License
+
+Glove is licensed under [GPL-3.0-only](LICENSE). Dependency licenses are listed
+in [CREDITS.md](CREDITS.md).
