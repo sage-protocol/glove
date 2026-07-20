@@ -1,8 +1,17 @@
+---
+description: Glove repository supplement for security-sensitive C++ work
+argument-hint: "[TASK=<description>] [PHASE=<start|checkpoint|complete>]"
+---
+
 # Glove contributor instructions
 
 Glove contains untrusted agent processes with platform sandboxing and mediates
 their tool access. Security-sensitive changes must preserve fail-closed behavior
 and the documented capability boundary.
+
+The retrieval, execution, checkpoint, and handoff contract is in
+[docs/prompts/PROMPT-eng-codex.md](docs/prompts/PROMPT-eng-codex.md). This file
+contains only Glove-specific rules and validation requirements.
 
 Read [docs/architecture.md](docs/architecture.md) before changing process,
 filesystem, control, or protocol boundaries. Read
