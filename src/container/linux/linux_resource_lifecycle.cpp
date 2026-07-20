@@ -313,6 +313,10 @@ auto linux_resource_lifecycle::finish(int wait_status, std::uint64_t finished_at
     if (!filesystem) {
         return std::unexpected(filesystem.error());
     }
+    auto retained_changes = filesystem_.finalize_retained_changes();
+    if (!retained_changes) {
+        return std::unexpected(retained_changes.error());
+    }
     const auto wall_output = monitor_->snapshot();
     const auto cause = terminal_cause(wall_output, *cgroup, limits_, *filesystem, wait_status);
     const linux_resource_terminal_observation terminal{
@@ -332,6 +336,7 @@ auto linux_resource_lifecycle::finish(int wait_status, std::uint64_t finished_at
         .started_at_ms = started_at_ms_,
         .finished_at_ms = finished_at_ms,
         .termination_callback_failed = wall_output.termination_callback_failed,
+        .retained_changes = std::move(*retained_changes),
     };
     pending_terminal_ = terminal;
     if (auto cleaned = cleanup_resources(); !cleaned) {

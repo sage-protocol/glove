@@ -162,6 +162,7 @@ auto receipt() -> glove::container::resource_enforcement_receipt {
         .started_at_ms = 1'000,
         .finished_at_ms = 1'750,
         .library_projections = {},
+        .retained_changes = {},
     };
 }
 
@@ -319,6 +320,9 @@ auto run() -> int {
         .producer = producer_config,
         .plan_validator = {},
         .sessions = {},
+        .session_runtime = {},
+        .path_exposures = {},
+        .materialization_root = {},
         .io_timeout_ms = 100,
     };
     auto server = glove::control::receipt_audit_unix_server::create(server_config);

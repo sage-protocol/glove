@@ -2,6 +2,7 @@
 
 #include "glove/container/receipt_producer.hpp"
 #include "glove/control/session_registry.hpp"
+#include "glove/supervisor/path_exposure.hpp"
 #include "glove/supervisor/session_plan.hpp"
 
 #include <cstddef>
@@ -45,7 +46,9 @@ public:
         std::shared_ptr<container::receipt_audit_producer> producer,
         std::shared_ptr<const supervisor::session_plan_validator> plan_validator = {},
         std::shared_ptr<session_registry> sessions = {},
-        std::shared_ptr<linux_detail::linux_session_runtime> session_runtime = {}
+        std::shared_ptr<linux_detail::linux_session_runtime> session_runtime = {},
+        std::shared_ptr<supervisor::path_exposure_registry> path_exposures = {},
+        std::string materialization_root = {}
     ) -> std::expected<std::unique_ptr<receipt_audit_protocol>, std::string>;
 
     // The first authenticated page supplies Sage's trusted prefix and lazily
@@ -56,7 +59,9 @@ public:
         container::receipt_audit_producer_config producer_config,
         std::shared_ptr<const supervisor::session_plan_validator> plan_validator = {},
         std::shared_ptr<session_registry> sessions = {},
-        std::shared_ptr<linux_detail::linux_session_runtime> session_runtime = {}
+        std::shared_ptr<linux_detail::linux_session_runtime> session_runtime = {},
+        std::shared_ptr<supervisor::path_exposure_registry> path_exposures = {},
+        std::string materialization_root = {}
     ) -> std::expected<std::unique_ptr<receipt_audit_protocol>, std::string>;
 
     // Request failures are encoded as stable JSON-RPC errors. `unexpected` is

@@ -1,4 +1,5 @@
 #include "glove/supervisor/path_alias.hpp"
+#include "glove/supervisor/path_exposure.hpp"
 #include "glove/supervisor/session_plan.hpp"
 
 #include <sys/stat.h>
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -85,8 +87,11 @@ auto policy_json(const std::filesystem::path& source) -> std::string {
            R"(","target_path":"/workspace","max_ttl_secs":120,"access":[{"access":"ephemeral_write","materialization":"copy","create_policy":"empty_directory","cleanup_policy":"remove","max_bytes":2097152}]}],"library_projection_destinations":[{"alias":"libraries","target_path":"/opt/sage/library-bundles"}],"resource_profiles":[{"profile_id":"small","cpu_time_ms":1000,"memory_bytes":67108864,"pids":16,"wall_time_ms":2000,"disk_bytes":2097152,"terminal_output_bytes":1048576}],"egress_policy_ids":["no-network"],"tool_policy_ids":["sage-readonly"],"secret_handles":["codex-token"]})";
 }
 
-auto validator_for(const std::filesystem::path& source, bool with_launch = true)
-    -> glove::supervisor::result<glove::supervisor::session_plan_validator> {
+auto validator_for(
+    const std::filesystem::path& source,
+    bool with_launch = true,
+    std::shared_ptr<const glove::supervisor::path_exposure_registry> exposures = {}
+) -> glove::supervisor::result<glove::supervisor::session_plan_validator> {
     using namespace glove::supervisor;
     path_alias_policy path{
         .alias = "workspace",
@@ -147,7 +152,8 @@ auto validator_for(const std::filesystem::path& source, bool with_launch = true)
             .tool_policy_ids = {"sage-readonly"},
             .secret_handles = {"codex-token"},
         },
-        std::move(*paths)
+        std::move(*paths),
+        std::move(exposures)
     );
 }
 
@@ -208,6 +214,71 @@ auto run() -> int {
     REQUIRE(library_targets->size() == 1U);
     REQUIRE(library_targets->front().projection == libraries->front());
     REQUIRE(library_targets->front().target_path == "/opt/sage/library-bundles");
+
+    auto exposure_registry = path_exposure_registry::build({
+        path_exposure_root_policy{
+            .root_id = "projects",
+            .host_root = std::filesystem::canonical(temp.root()).string(),
+            .allowed_modes =
+                {
+                    path_exposure_mode{
+                        .access = path_access::ephemeral_write,
+                        .materialization = path_materialization::copy,
+                        .max_bytes = 2'097'152,
+                        .cleanup_policy = path_cleanup_policy::remove,
+                    },
+                },
+            .max_ttl_secs = 120,
+            .allowed_runtime_template_ids = {"codex-safe"},
+        },
+    });
+    REQUIRE(exposure_registry.has_value());
+    auto shared_exposures = std::make_shared<path_exposure_registry>(std::move(*exposure_registry));
+    auto exposure = shared_exposures->create(
+        path_exposure_create_request{
+            .request_id = "create-worktree",
+            .exposure_id = "worktree",
+            .root_id = "projects",
+            .host_path = std::filesystem::canonical(source).string(),
+            .display_label = "Worktree",
+            .allowed_modes =
+                {
+                    path_exposure_mode{
+                        .access = path_access::ephemeral_write,
+                        .materialization = path_materialization::copy,
+                        .max_bytes = 2'097'152,
+                        .cleanup_policy = path_cleanup_policy::remove,
+                    },
+                },
+            .ttl_secs = 120,
+            .allowed_runtime_template_ids = {"codex-safe"},
+        },
+        1'000
+    );
+    REQUIRE(exposure.has_value());
+    auto v2_validator = validator_for(source, true, shared_exposures);
+    REQUIRE(v2_validator.has_value());
+    const auto v2_plan =
+        R"({"schema_version":2,"runtime_id":"codex","runtime_template_id":"codex-safe","adapter_command_digest":")" +
+        launch_digest() +
+        R"(","sandbox_backend":"linux_production","egress_policy_id":"no-network","tool_policy_id":"sage-readonly","path_grants":[{"exposure_id":"worktree","generation":1,"scope_digest":")" +
+        exposure->scope_digest +
+        R"(","access":"ephemeral_write","materialization":"copy","max_bytes":1048576,"ttl_secs":60,"cleanup_policy":"remove"}],"library_projections":[{"projection_id":"sage-core","content_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","destination_alias":"libraries"}],"secret_handles":["codex-token"],"limits":{"cpu_time_ms":1000,"memory_bytes":67108864,"pids":16,"wall_time_ms":2000,"disk_bytes":2097152,"terminal_output_bytes":1048576},"policy_revision":7,"expires_at_ms":61000})";
+    auto accepted_v2 = v2_validator->validate_json(v2_plan, 1'000);
+    REQUIRE(accepted_v2.has_value());
+    REQUIRE(accepted_v2->schema_version == 2);
+    auto canonical_v2 = v2_validator->canonicalize_json(v2_plan, 1'000);
+    REQUIRE(canonical_v2.has_value());
+    REQUIRE(canonical_v2->canonical_json == v2_plan);
+    auto resolved_v2 = v2_validator->resolve_path_grants_json(v2_plan, 1'000);
+    REQUIRE(resolved_v2.has_value());
+    REQUIRE(resolved_v2->size() == 1U);
+    REQUIRE(resolved_v2->front().alias() == "worktree");
+    REQUIRE(resolved_v2->front().target_path() == "/workspace/exposures/worktree");
+    REQUIRE(shared_exposures->revoke("revoke-worktree", "worktree", exposure->generation, 2'000)
+                .has_value());
+    REQUIRE(!v2_validator->validate_json(v2_plan, 2'000).has_value());
+    REQUIRE(resolved_v2->front().verify_identity().has_value());
 
     const auto changed_library = replace_once(valid_plan(), "sage-core", "sage-other");
     auto changed_libraries = validator->resolve_library_projections_json(changed_library, 1'000);

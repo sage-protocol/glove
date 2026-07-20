@@ -91,6 +91,11 @@ struct supervisor_capabilities {
     glz::raw_json receipt_audit;
     session_control_capabilities session_control;
     std::uint8_t agent_runtime_adapter_schema_version = 0;
+    std::uint8_t path_exposure_admin_schema_version = 0;
+    std::uint8_t path_exposure_catalog_schema_version = 0;
+    std::uint8_t retained_write_schema_version = 0;
+    std::uint8_t change_manifest_schema_version = 0;
+    std::uint8_t change_apply_authorization_schema_version = 0;
     std::vector<backend_capabilities> backends;
 };
 
@@ -574,6 +579,11 @@ auto run() -> int {
     REQUIRE(capabilities.session_control.detach);
     REQUIRE(capabilities.session_control.cleanup_session);
     REQUIRE(capabilities.agent_runtime_adapter_schema_version == 0);
+    REQUIRE(capabilities.path_exposure_admin_schema_version == 0);
+    REQUIRE(capabilities.path_exposure_catalog_schema_version == 0);
+    REQUIRE(capabilities.retained_write_schema_version == 0);
+    REQUIRE(capabilities.change_manifest_schema_version == 0);
+    REQUIRE(capabilities.change_apply_authorization_schema_version == 0);
     REQUIRE(capabilities.backends.size() == 2);
     REQUIRE(capabilities.backends[0].backend == "linux_production");
     REQUIRE(capabilities.backends[0].resource_enforcement.cpu_time == "cgroup_v2");

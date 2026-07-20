@@ -489,6 +489,17 @@ auto transact(const std::filesystem::path& socket_path, std::string_view frame)
     return response;
 }
 
+auto transact_with_retry(const std::filesystem::path& socket_path, std::string_view frame)
+    -> std::optional<std::string> {
+    for (int attempt = 0; attempt < 300; ++attempt) {
+        if (auto response = transact(socket_path, frame)) {
+            return response;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    return std::nullopt;
+}
+
 auto make_request(
     std::string_view id,
     std::string_view method,
@@ -525,8 +536,9 @@ auto page_and_acknowledge(
         return false;
     }
     const auto page_payload = "{\"sage_anchor\":" + *genesis_json + ",\"limit\":10}";
-    auto page_frame =
-        transact(socket_path, make_request("page", "verify_audit_chain", secret, page_payload));
+    auto page_frame = transact_with_retry(
+        socket_path, make_request("page", "verify_audit_chain", secret, page_payload)
+    );
     if (!page_frame) {
         return false;
     }
@@ -540,7 +552,7 @@ auto page_and_acknowledge(
         return false;
     }
     const auto ack_payload = "{\"anchor\":" + *genesis_json + "}";
-    auto ack_frame = transact(
+    auto ack_frame = transact_with_retry(
         socket_path,
         make_request("ack", "acknowledge_audit_chain", secret, ack_payload, "lifecycle-ack")
     );
@@ -565,7 +577,7 @@ auto validate_plan(const std::filesystem::path& socket_path, std::string_view se
                                        std::chrono::system_clock::now().time_since_epoch()
         )
                                        .count());
-    auto frame = transact(
+    auto frame = transact_with_retry(
         socket_path,
         make_request("validate-plan", "validate_plan", secret, plan_json(now_ms + 60'000U))
     );
@@ -594,7 +606,7 @@ auto create_or_read_session(
         const auto payload = "{\"session_id\":\"lifecycle-session\",\"controller_plan_digest\":\"" +
                              std::string{digest} + "\",\"plan\":" + plan_json(now_ms + 60'000U) +
                              "}";
-        auto frame = transact(
+        auto frame = transact_with_retry(
             socket_path,
             make_request(
                 "create-session", "create_session", secret, payload, "lifecycle-create-session"
@@ -605,7 +617,7 @@ auto create_or_read_session(
             return false;
         }
     }
-    auto status_frame = transact(
+    auto status_frame = transact_with_retry(
         socket_path,
         make_request(
             "session-status", "session_status", secret, "{\"session_id\":\"lifecycle-session\"}"
@@ -684,7 +696,7 @@ auto run() -> int {
     REQUIRE(!std::filesystem::exists(socket_path));
 
     auto third = start_gloved(temp.root(), key_path, journal_path);
-    REQUIRE(wait_until_ready(third, socket_path, secret_path));
+    REQUIRE(wait_until_secret_changes(third, socket_path, secret_path, *second_secret));
     const auto third_secret = read_secret(secret_path);
     REQUIRE(third_secret.has_value());
     REQUIRE(*third_secret != *second_secret);
@@ -743,7 +755,9 @@ auto run() -> int {
     REQUIRE(WEXITSTATUS(*unbound_library_root_status) != 0);
     REQUIRE(read_secret(secret_path) == pre_policy_secret);
     auto policy_enabled = start_gloved(temp.root(), key_path, journal_path, policy_path);
-    REQUIRE(wait_until_ready(policy_enabled, socket_path, secret_path));
+    REQUIRE(
+        wait_until_secret_changes(policy_enabled, socket_path, secret_path, *pre_policy_secret)
+    );
     const auto policy_secret = read_secret(secret_path);
     REQUIRE(policy_secret.has_value());
     REQUIRE(validate_plan(socket_path, *policy_secret));
@@ -753,7 +767,7 @@ auto run() -> int {
     const auto session_store = temp.root() / "sessions.journal";
     auto session_enabled =
         start_gloved(temp.root(), key_path, journal_path, policy_path, session_store);
-    REQUIRE(wait_until_ready(session_enabled, socket_path, secret_path));
+    REQUIRE(wait_until_secret_changes(session_enabled, socket_path, secret_path, *policy_secret));
     const auto session_secret = read_secret(secret_path);
     REQUIRE(session_secret.has_value());
     REQUIRE(create_or_read_session(socket_path, *session_secret, true));
@@ -794,7 +808,7 @@ auto run() -> int {
         std::nullopt,
         library_bundle_root
     );
-    REQUIRE(wait_until_ready(library_enabled, socket_path, secret_path));
+    REQUIRE(wait_until_secret_changes(library_enabled, socket_path, secret_path, *session_secret));
     const auto library_secret = read_secret(secret_path);
     REQUIRE(library_secret.has_value());
     REQUIRE(create_or_read_session(socket_path, *library_secret, false));
@@ -814,7 +828,9 @@ auto run() -> int {
 
     auto session_recovered =
         start_gloved(temp.root(), key_path, journal_path, policy_path, session_store);
-    REQUIRE(wait_until_ready(session_recovered, socket_path, secret_path));
+    REQUIRE(wait_until_secret_changes(
+        session_recovered, socket_path, secret_path, *pre_unsafe_store_secret
+    ));
     const auto recovered_secret = read_secret(secret_path);
     REQUIRE(recovered_secret.has_value());
     REQUIRE(create_or_read_session(socket_path, *recovered_secret, false));

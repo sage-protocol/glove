@@ -224,6 +224,26 @@ auto encode_receipt(const resource_enforcement_receipt& receipt)
             encoder.append_string(projection.content_digest);
         }
     }
+    if (!receipt.retained_changes.empty()) {
+        encoder.append_string("glove.retained-change-receipts");
+        encoder.append_u8(1);
+        encoder.append_u32(static_cast<std::uint32_t>(receipt.retained_changes.size()));
+        for (const auto& change : receipt.retained_changes) {
+            encoder.append_string(change.exposure_id);
+            encoder.append_u64(change.generation);
+            encoder.append_string(change.scope_digest);
+            encoder.append_string(change.source_identity_digest);
+            encoder.append_string(change.baseline_tree_digest);
+            encoder.append_string(change.staged_tree_digest);
+            encoder.append_string(change.manifest_digest);
+            encoder.append_u64(change.created);
+            encoder.append_u64(change.modified);
+            encoder.append_u64(change.renamed);
+            encoder.append_u64(change.removed);
+            encoder.append_u64(change.before_bytes);
+            encoder.append_u64(change.after_bytes);
+        }
+    }
     return encoder;
 }
 

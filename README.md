@@ -82,8 +82,8 @@ mkdir -p /tmp/glove-work
 
 `gloved` is an owner-local control service for plan validation, durable session
 state, authenticated receipt delivery, and a Linux managed-session lifecycle.
-Sage remote launch remains gated on independent direct-write consent,
-prompt-library expansion, and production service integration.
+Live host writes are unsupported. Dynamic path exposure is owner-local;
+write-capable sessions use isolated, quota-backed materializations.
 
 ```sh
 ./build/dev/src/gloved \
@@ -93,7 +93,9 @@ prompt-library expansion, and production service integration.
   --session-policy /absolute/owner-only/session-policy.json \
   --session-store /absolute/owner-only/sessions.journal \
   --materialization-root /absolute/owner-only/materializations \
-  --library-bundle-root /absolute/owner-only/sage-library-bundles
+  --library-bundle-root /absolute/owner-only/sage-library-bundles \
+  --path-exposure-policy /absolute/owner-only/path-exposure-policy.json \
+  --path-exposure-journal /absolute/owner-only/path-exposures.journal
 ```
 
 ## Documentation

@@ -1,6 +1,7 @@
 #include "glove/container/receipt_producer.hpp"
 #include "glove/control/receipt_audit_protocol.hpp"
 #include "glove/supervisor/path_alias.hpp"
+#include "glove/supervisor/path_exposure.hpp"
 #include "glove/supervisor/session_plan.hpp"
 
 #include "receipt_audit_wire.hpp"
@@ -108,6 +109,7 @@ auto receipt() -> glove::container::resource_enforcement_receipt {
         .started_at_ms = 1'000,
         .finished_at_ms = 1'750,
         .library_projections = {},
+        .retained_changes = {},
     };
 }
 
@@ -179,7 +181,41 @@ struct supervisor_capabilities {
     receipt_audit_capabilities receipt_audit;
     session_control_capabilities session_control;
     std::uint8_t agent_runtime_adapter_schema_version = 0;
+    std::uint8_t path_exposure_admin_schema_version = 0;
+    std::uint8_t path_exposure_catalog_schema_version = 0;
+    std::uint8_t retained_write_schema_version = 0;
+    std::uint8_t change_manifest_schema_version = 0;
+    std::uint8_t change_apply_authorization_schema_version = 0;
     std::vector<backend_capabilities> backends;
+};
+
+struct path_exposure_mode {
+    std::string access;
+    std::string materialization;
+    std::uint64_t max_bytes = 0;
+    std::string cleanup_policy;
+};
+
+struct path_exposure_projection {
+    std::uint8_t schema_version = 0;
+    std::string exposure_id;
+    std::uint64_t generation = 0;
+    std::string scope_digest;
+    std::string display_label;
+    std::vector<path_exposure_mode> allowed_modes;
+    std::uint64_t expires_at_ms = 0;
+    std::vector<std::string> allowed_runtime_template_ids;
+    std::string state;
+};
+
+struct path_exposure_result {
+    std::uint8_t schema_version = 0;
+    path_exposure_projection exposure;
+};
+
+struct path_exposure_list_result {
+    std::uint8_t schema_version = 0;
+    std::vector<path_exposure_projection> exposures;
 };
 
 struct session_plan_validation {
@@ -367,6 +403,11 @@ auto run() -> int {
     REQUIRE(!capabilities.session_control.stop_session);
     REQUIRE(!capabilities.session_control.cleanup_session);
     REQUIRE(capabilities.agent_runtime_adapter_schema_version == 0);
+    REQUIRE(capabilities.path_exposure_admin_schema_version == 0);
+    REQUIRE(capabilities.path_exposure_catalog_schema_version == 0);
+    REQUIRE(capabilities.retained_write_schema_version == 0);
+    REQUIRE(capabilities.change_manifest_schema_version == 0);
+    REQUIRE(capabilities.change_apply_authorization_schema_version == 0);
     REQUIRE(capabilities.backends.size() == 2);
     for (const auto& backend : capabilities.backends) {
         REQUIRE(backend.resource_enforcement.cpu_time == "unavailable");
@@ -410,6 +451,163 @@ auto run() -> int {
         REQUIRE(unavailable_response->error.has_value());
         REQUIRE(unavailable_response->error->code == "method_not_found");
     }
+
+    const auto exposure_root = temp.root() / "exposure-root";
+    const auto exposure_source = exposure_root / "sage-protocol";
+    REQUIRE(std::filesystem::create_directories(exposure_source));
+    const auto canonical_exposure_root = std::filesystem::canonical(exposure_root);
+    const auto canonical_exposure_source = std::filesystem::canonical(exposure_source);
+    auto exposure_registry = glove::supervisor::path_exposure_registry::open(
+        {
+            glove::supervisor::path_exposure_root_policy{
+                .root_id = "projects",
+                .host_root = canonical_exposure_root.string(),
+                .allowed_modes =
+                    {
+                        glove::supervisor::path_exposure_mode{
+                            .access = glove::supervisor::path_access::read,
+                            .materialization = glove::supervisor::path_materialization::bind,
+                            .max_bytes = 0,
+                            .cleanup_policy = glove::supervisor::path_cleanup_policy::retain,
+                        },
+                        glove::supervisor::path_exposure_mode{
+                            .access = glove::supervisor::path_access::retained_write,
+                            .materialization = glove::supervisor::path_materialization::copy,
+                            .max_bytes = 67'108'864,
+                            .cleanup_policy = glove::supervisor::path_cleanup_policy::retain,
+                        },
+                    },
+                .max_ttl_secs = 7'200,
+                .allowed_runtime_template_ids = {"codex-safe"},
+            },
+        },
+        temp.root() / "path-exposures.journal",
+        std::uint64_t{8} * 1024U * 1024U
+    );
+    REQUIRE(exposure_registry.has_value());
+    auto shared_exposures =
+        std::make_shared<glove::supervisor::path_exposure_registry>(std::move(*exposure_registry));
+    auto exposure_protocol = glove::control::receipt_audit_protocol::create(
+        bootstrap_secret, *recovered, {}, {}, {}, shared_exposures
+    );
+    REQUIRE(exposure_protocol.has_value());
+    auto exposure_capabilities =
+        (*exposure_protocol)
+            ->handle_frame(
+                make_request("exposure-capabilities", "capabilities", bootstrap_secret, "null"),
+                1'000
+            );
+    REQUIRE(exposure_capabilities.has_value());
+    auto exposure_capabilities_response = decode_response(*exposure_capabilities);
+    REQUIRE(exposure_capabilities_response.has_value());
+    REQUIRE(exposure_capabilities_response->result.has_value());
+    supervisor_capabilities exposure_capability_set;
+    REQUIRE(!glz::read<glz::opts{.error_on_unknown_keys = true}>(
+        exposure_capability_set, exposure_capabilities_response->result->str
+    ));
+    REQUIRE(exposure_capability_set.path_exposure_admin_schema_version == 1);
+    REQUIRE(exposure_capability_set.path_exposure_catalog_schema_version == 1);
+    REQUIRE(exposure_capability_set.retained_write_schema_version == 0);
+    REQUIRE(exposure_capability_set.change_manifest_schema_version == 0);
+    REQUIRE(exposure_capability_set.change_apply_authorization_schema_version == 0);
+
+    const auto exposure_payload =
+        std::string{
+            "{\"exposure_id\":\"sage-workspace\",\"root_id\":\"projects\",\"host_path\":\""
+        } +
+        canonical_exposure_source.string() +
+        "\",\"display_label\":\"Sage "
+        "protocol\",\"allowed_modes\":[{\"access\":\"read\",\"materialization\":\"bind\",\"max_"
+        "bytes\":0,\"cleanup_policy\":\"retain\"},{\"access\":\"retained_write\","
+        "\"materialization\":\"copy\",\"max_bytes\":33554432,\"cleanup_policy\":\"retain\"}],\"ttl_"
+        "secs\":3600,\"allowed_runtime_template_ids\":[\"codex-safe\"]}";
+    auto exposure_created = (*exposure_protocol)
+                                ->handle_frame(
+                                    make_request(
+                                        "exposure-create",
+                                        "create_path_exposure",
+                                        bootstrap_secret,
+                                        exposure_payload,
+                                        "exposure-create-1"
+                                    ),
+                                    1'000
+                                );
+    REQUIRE(exposure_created.has_value());
+    REQUIRE(exposure_created->find(canonical_exposure_source.string()) == std::string::npos);
+    auto exposure_created_response = decode_response(*exposure_created);
+    REQUIRE(exposure_created_response.has_value());
+    REQUIRE(exposure_created_response->result.has_value());
+    wire_test::path_exposure_result created_exposure;
+    REQUIRE(!glz::read<glz::opts{.error_on_unknown_keys = true}>(
+        created_exposure, exposure_created_response->result->str
+    ));
+    REQUIRE(created_exposure.exposure.exposure_id == "sage-workspace");
+    REQUIRE(created_exposure.exposure.generation == 1);
+    REQUIRE(created_exposure.exposure.scope_digest.size() == 64U);
+    REQUIRE(created_exposure.exposure.state == "active");
+
+    auto exposure_listed =
+        (*exposure_protocol)
+            ->handle_frame(
+                make_request("exposure-list", "list_path_exposures", bootstrap_secret, "null"),
+                2'000
+            );
+    REQUIRE(exposure_listed.has_value());
+    auto exposure_listed_response = decode_response(*exposure_listed);
+    REQUIRE(exposure_listed_response.has_value());
+    REQUIRE(exposure_listed_response->result.has_value());
+    wire_test::path_exposure_list_result listed_exposures;
+    REQUIRE(!glz::read<glz::opts{.error_on_unknown_keys = true}>(
+        listed_exposures, exposure_listed_response->result->str
+    ));
+    REQUIRE(listed_exposures.exposures.size() == 1U);
+
+    const std::string revoke_payload = R"({"exposure_id":"sage-workspace","generation":1})";
+    auto exposure_revoked = (*exposure_protocol)
+                                ->handle_frame(
+                                    make_request(
+                                        "exposure-revoke",
+                                        "revoke_path_exposure",
+                                        bootstrap_secret,
+                                        revoke_payload,
+                                        "exposure-revoke-1",
+                                        4'000
+                                    ),
+                                    3'000
+                                );
+    REQUIRE(exposure_revoked.has_value());
+    auto exposure_revoked_response = decode_response(*exposure_revoked);
+    REQUIRE(exposure_revoked_response.has_value());
+    if (exposure_revoked_response->error) {
+        std::fprintf(
+            stderr,
+            "exposure revoke failed: %s: %s\n",
+            exposure_revoked_response->error->code.c_str(),
+            exposure_revoked_response->error->message.c_str()
+        );
+    }
+    REQUIRE(exposure_revoked_response->result.has_value());
+    wire_test::path_exposure_result revoked_exposure;
+    REQUIRE(!glz::read<glz::opts{.error_on_unknown_keys = true}>(
+        revoked_exposure, exposure_revoked_response->result->str
+    ));
+    REQUIRE(revoked_exposure.exposure.state == "revoked");
+    auto revoke_replay = (*exposure_protocol)
+                             ->handle_frame(
+                                 make_request(
+                                     "exposure-revoke-replay",
+                                     "revoke_path_exposure",
+                                     bootstrap_secret,
+                                     revoke_payload,
+                                     "exposure-revoke-1",
+                                     4'000
+                                 ),
+                                 3'001
+                             );
+    REQUIRE(revoke_replay.has_value());
+    auto revoke_replay_response = decode_response(*revoke_replay);
+    REQUIRE(revoke_replay_response.has_value());
+    REQUIRE(revoke_replay_response->result.has_value());
 
     const auto plan_source = temp.root() / "plan-source";
     REQUIRE(std::filesystem::create_directory(plan_source));

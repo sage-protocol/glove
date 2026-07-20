@@ -138,6 +138,7 @@ auto terminal_receipt(
         .started_at_ms = started_at_ms,
         .finished_at_ms = finished_at_ms,
         .library_projections = {},
+        .retained_changes = {},
     };
 }
 

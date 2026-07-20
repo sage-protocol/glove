@@ -27,6 +27,9 @@ struct session_reconciliation_report {
     std::size_t recovered_exited = 0;
     std::size_t recovered_failed = 0;
     std::size_t recovered_terminated = 0;
+    std::size_t orphan_materializations_inspected = 0;
+    std::size_t orphan_materializations_removed = 0;
+    std::size_t orphan_retained_changes_recovered = 0;
     std::vector<std::string> unresolved_running_session_ids;
     std::vector<std::string> live_running_session_ids;
     std::vector<std::string> identity_mismatch_session_ids;

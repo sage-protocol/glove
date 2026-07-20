@@ -60,6 +60,7 @@ auto receipt() -> glove::container::resource_enforcement_receipt {
         .started_at_ms = 1'000,
         .finished_at_ms = 1'750,
         .library_projections = {},
+        .retained_changes = {},
     };
 }
 

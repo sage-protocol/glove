@@ -115,6 +115,30 @@ auto valid_library_projection_receipts(const std::vector<library_projection_rece
     return true;
 }
 
+auto valid_retained_change_receipts(
+    const std::vector<retained_change_receipt>& changes, std::uint64_t disk_bytes
+) -> bool {
+    if (changes.size() > 64U) {
+        return false;
+    }
+    std::string_view previous_id;
+    for (const auto& change : changes) {
+        if (!valid_bounded_identifier(change.exposure_id) || change.generation == 0 ||
+            !valid_digest(change.scope_digest) || !valid_digest(change.source_identity_digest) ||
+            !valid_digest(change.baseline_tree_digest) ||
+            !valid_digest(change.staged_tree_digest) || !valid_digest(change.manifest_digest) ||
+            (!previous_id.empty() && previous_id >= change.exposure_id) ||
+            change.created > 100'000U || change.modified > 100'000U || change.renamed > 100'000U ||
+            change.removed > 100'000U ||
+            change.created + change.modified + change.renamed + change.removed > 100'000U ||
+            change.before_bytes > disk_bytes || change.after_bytes > disk_bytes) {
+            return false;
+        }
+        previous_id = change.exposure_id;
+    }
+    return true;
+}
+
 } // namespace
 
 auto resource_enforcement_capabilities::complete() const noexcept -> bool {
@@ -309,6 +333,11 @@ auto validate_resource_enforcement_receipt(
     }
     if (!valid_library_projection_receipts(receipt.library_projections)) {
         return std::unexpected(std::string{"resource receipt library projections are invalid"});
+    }
+    if (!valid_retained_change_receipts(
+            receipt.retained_changes, receipt.configured_limits.disk_bytes
+        )) {
+        return std::unexpected(std::string{"resource receipt retained changes are invalid"});
     }
     if (receipt.started_at_ms == 0 || receipt.finished_at_ms < receipt.started_at_ms) {
         return std::unexpected(std::string{"resource receipt has invalid time bounds"});

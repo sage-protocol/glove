@@ -483,7 +483,9 @@ auto receipt_audit_unix_server::create(receipt_audit_unix_server_config config)
         config.producer,
         std::move(config.plan_validator),
         std::move(config.sessions),
-        std::move(config.session_runtime)
+        std::move(config.session_runtime),
+        std::move(config.path_exposures),
+        std::move(config.materialization_root)
     );
     if (!protocol) {
         return std::unexpected(protocol.error());

@@ -77,6 +77,19 @@ auto reconcile_linux_session_registry(
             std::string{"inventory Linux recovery resources: "} + candidates.error().message
         );
     }
+    std::vector<std::string> protected_sessions;
+    protected_sessions.reserve(candidates->size());
+    for (const auto& candidate : *candidates) {
+        protected_sessions.push_back(candidate.session.session_id);
+    }
+    auto swept = supervisor::linux_detail::linux_session_filesystem::sweep_orphaned(
+        materialization_root, protected_sessions
+    );
+    if (!swept) {
+        return std::unexpected(
+            std::string{"recover orphaned Linux materializations: "} + swept.error()
+        );
+    }
     for (const auto& candidate : *candidates) {
         if (candidate.session.state != session_state::starting) {
             continue;
@@ -157,7 +170,14 @@ auto reconcile_linux_session_registry(
         }
         return session_process_observation::terminated;
     };
-    return reconcile_session_registry(registry, receipt_producer, now_ms, observer);
+    auto reconciled = reconcile_session_registry(registry, receipt_producer, now_ms, observer);
+    if (!reconciled) {
+        return std::unexpected(reconciled.error());
+    }
+    reconciled->orphan_materializations_inspected = swept->inspected;
+    reconciled->orphan_materializations_removed = swept->removed_without_stage;
+    reconciled->orphan_retained_changes_recovered = swept->recovered_retained_changes.size();
+    return reconciled;
 }
 
 } // namespace glove::control::linux_detail

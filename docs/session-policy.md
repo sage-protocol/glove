@@ -13,6 +13,7 @@ variables, or raw secrets.
 | plus `--session-store` | `create_session`, `session_status` |
 | Linux plus `--materialization-root` | `start_session`, `attach`, `write_stdin`, `resize`, `signal`, `detach`, `stop_session`, `cleanup_session` |
 | plus `--library-bundle-root` | digest-bound read-only bundle projection |
+| `--path-exposure-policy` plus `--path-exposure-journal` | local exposure administration and redacted catalog |
 
 Capabilities are derived from successfully constructed components. macOS does
 not advertise managed-session resource enforcement.
@@ -23,9 +24,14 @@ exact Sage bundle into Codex/Pi-native locations, and commits the derived
 context to the launch profile and receipt. Sage requires version `1` before
 remote launch.
 
-Direct-write plans are rejected at start because Glove does not yet have a
-separate authenticated local-consent record. Harness bundle expansion is an
-independent gate for every remotely managed agent session.
+`direct_write` remains a legacy parse-only value and is rejected at launch.
+New write-capable plans use isolated `retained_write` materializations; applying
+their changes to the source is a separate, not-yet-enabled operation.
+On Linux, retained copies use a hard-sized ext4 image attached through an
+autoclear loop device so the staged filesystem survives daemon and host
+restarts. Ephemeral copies and session scratch remain quota-sized tmpfs mounts.
+Retained images require a root-owned, non-writable `/usr/sbin/mkfs.ext4` or
+`/sbin/mkfs.ext4`, loop-control access, and mount capability.
 
 ## Protected files
 
@@ -40,6 +46,20 @@ independent gate for every remotely managed agent session.
 Policy and bundle reads use one descriptor and reject metadata or identity
 changes during validation. Policy is frozen for the process lifetime; replace
 it atomically and restart `gloved` to change it.
+
+## Dynamic path exposures
+
+Exposure policy defines owner-approved roots, exact mode/quota tuples, maximum
+TTL, and runtime templates. The paired journal records local descendant leases.
+Both files require owner-only placement; the journal is bounded, hash-chained,
+single-writer, and replayed strictly.
+
+On Linux, descendants resolve with `openat2` using `RESOLVE_BENEATH`,
+`RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS`, and `RESOLVE_NO_XDEV`.
+Other platforms use component-wise no-follow descriptor traversal. A catalog
+entry exposes only its ID, generation, scope digest, label, allowed modes,
+expiry, runtimes, and state. Paths, root IDs, and source identities remain
+local. Replacing a live generation requires revocation or expiry.
 
 ## Policy schema
 
@@ -115,6 +135,35 @@ A submitted plan must match:
 - path aliases, access modes, materialization, cleanup, TTL, and byte quotas;
 - library digests and configured destination aliases.
 
+Retained changes are staged and inspected separately from host mutation. The
+apply authorization schema, root-controlled Ed25519 trust-policy loader,
+durable single-use reservation journal, and Linux whole-entry atomic-exchange
+primitive are present. The primitive rejects stale baselines, copies without
+following links, recursively syncs the candidate, uses
+`renameat2(RENAME_EXCHANGE)`, and retains the old source for recovery. No
+production signature backend or privileged signing helper is wired. Receipt
+construction, reconstructable durable terminal finalization, prepared-candidate
+discard, committed-state recovery, and idempotent baseline cleanup are
+implemented locally. Grant IDs, authorization digests, and manifest digests are
+each globally single-use. Ambiguous states remain consumed and non-terminal. These
+operations are not yet connected to the control server, receipt audit stream,
+or startup recovery sweep. Glove therefore advertises apply schema version `0`
+and rejects apply operations.
+
+Apply supports only service-owned, single-link, non-sparse regular files and
+directories without ACLs, extended attributes, symlinks, special files, or
+special mode bits. Contents and child modes come from the frozen stage; the
+source-root mode is retained; ownership is normalized to the Glove service
+identity; timestamps are intentionally regenerated. A production deployment
+must also prevent Sage from mutating the source parent during the final
+identity-check/exchange interval. Same-UID access to that parent is not a
+sufficient boundary.
+
+The pre-reservation and execution checks also require the full logical staged
+tree plus a 64 MiB reserve to fit in the source filesystem's currently
+available blocks. Copy bounds and filesystem errors still fail closed if
+concurrent disk use consumes that headroom.
+
 Arrays must be canonical and unique. Host paths and sandbox targets remain local
 to the policy.
 
@@ -167,11 +216,31 @@ acknowledgement must match the exact head; Sage archives before acknowledging.
 
 Recovery identifies processes by boot ID, PID start time, and cgroup identity,
 not PID alone. Identity mismatch has no signaling side effect. Orphaned
-materializations are removed only after quota and descriptor checks.
+materializations are removed only after quota and descriptor checks. Retained
+images are remounted and frozen before cleanup; volatile materializations lost
+across a host restart are removed as empty mountpoints.
+
+Reserved apply transactions can reopen the exact journaled exposure parent by
+descriptor after lease revocation or expiry. This recovery-only lookup requires
+the exposure ID, generation, scope digest, and original source-identity digest;
+the local exposure journal also binds the parent directory identity, so a
+replacement at the same path is rejected. The lookup exposes neither a raw path
+nor launch authority.
+
+Recovery classifies only four descriptor-proven states: reserved, prepared,
+committed, or ambiguous. Reserved and safely discarded prepared transactions
+receive durable failed receipts. Committed exchanges receive durable applied
+receipts before baseline cleanup. The journal stores the stable failure code
+and all receipt bindings, so either terminal receipt can be reconstructed after
+restart. Failed terminal receipts require no surviving stage or exposure
+locator. Applied terminals resolve those objects only to retry baseline
+cleanup. The bounded startup reconciler reports redacted per-record issue
+codes. Ambiguous transactions are never retried or terminalized automatically.
 
 ## Remaining boundary
 
 Glove projects exact bundle files but does not expand their contents into
 agent-specific prompt-library directories or generate initial prompt context.
-`prompt_ref` remains rejected. Direct host writes remain unavailable pending a
-distinct authenticated local approval mechanism.
+`prompt_ref` remains rejected. Live direct host writes are outside v2. Applying
+a retained stage remains unavailable until Glove verifies an independently
+signed, single-use local authorization.

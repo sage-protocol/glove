@@ -1,5 +1,6 @@
 #pragma once
 
+#include "glove/supervisor/change_manifest.hpp"
 #include "glove/supervisor/path_alias.hpp"
 
 #include <cstdint>
@@ -51,6 +52,7 @@ public:
     }
 
     [[nodiscard]] result<materialization_usage> observe() const;
+    [[nodiscard]] result<std::optional<retained_change_manifest>> finalize_retained();
     [[nodiscard]] result<void> cleanup();
 
 private:
@@ -61,7 +63,8 @@ private:
         std::string directory_name,
         std::string target_path,
         std::string alias,
-        std::uint64_t quota_bytes
+        std::uint64_t quota_bytes,
+        bool persistent
     );
 
     [[nodiscard]] static result<ephemeral_copy_materialization> create_empty_session_scratch(
@@ -72,9 +75,20 @@ private:
 
     [[nodiscard]] static result<std::optional<ephemeral_copy_materialization>> adopt_recovered(
         std::string_view materialization_root,
+        std::string_view session_id,
         std::string directory_name,
         std::string alias,
         std::uint64_t quota_bytes
+    );
+
+    // Recovers one exact deterministic preparation orphan. Retained copies
+    // with durable metadata are finalized before cleanup; incomplete retained
+    // copies and volatile tmpfs mounts are removed without publication.
+    [[nodiscard]] static result<std::optional<retained_change_manifest>> recover_orphaned(
+        std::string_view materialization_root,
+        std::string_view session_id,
+        std::string directory_name,
+        std::string alias
     );
 
     ephemeral_copy_materialization(
@@ -106,7 +120,16 @@ private:
     std::uint64_t regular_files_ = 0;
     std::uint64_t directories_ = 0;
     std::optional<path_identity> source_identity_;
+    std::string session_id_;
+    std::uint64_t exposure_generation_ = 0;
+    std::string exposure_scope_digest_;
+    std::string source_identity_digest_;
+    std::vector<path_snapshot_entry> baseline_;
+    std::optional<retained_change_manifest> retained_manifest_;
+    std::string retained_metadata_name_;
+    std::string persistent_image_name_;
     bool is_directory_ = false;
+    bool persistent_ = false;
     bool mounted_ = false;
     bool cleanup_on_destroy_ = true;
 };

@@ -1,10 +1,12 @@
 #pragma once
 
 #include "glove/supervisor/path_alias.hpp"
+#include "glove/supervisor/path_exposure.hpp"
 
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -135,11 +137,16 @@ public:
     // Load strict host policy from an owner-only, single-link regular file.
     // The file is read through a stable descriptor and rechecked afterward;
     // raw host paths are confined to this local configuration surface.
-    [[nodiscard]] static auto load(const std::filesystem::path& policy_path)
-        -> result<session_plan_validator>;
+    [[nodiscard]] static auto load(
+        const std::filesystem::path& policy_path,
+        std::shared_ptr<const path_exposure_registry> exposures = {}
+    ) -> result<session_plan_validator>;
 
-    [[nodiscard]] static auto build(session_plan_policy policy, path_alias_registry paths)
-        -> result<session_plan_validator>;
+    [[nodiscard]] static auto build(
+        session_plan_policy policy,
+        path_alias_registry paths,
+        std::shared_ptr<const path_exposure_registry> exposures = {}
+    ) -> result<session_plan_validator>;
 
     [[nodiscard]] auto validate_json(std::string_view plan_json, std::uint64_t now_ms) const
         -> result<session_plan_validation>;
@@ -180,6 +187,7 @@ public:
 private:
     session_plan_policy policy_;
     path_alias_registry paths_;
+    std::shared_ptr<const path_exposure_registry> exposures_;
 };
 
 } // namespace glove::supervisor

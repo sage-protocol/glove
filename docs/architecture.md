@@ -50,7 +50,9 @@ does not sandbox the upstream processes themselves.
 
 Linux launches the child through `clone3`, configures the namespace and mount
 perimeter, applies seccomp, then releases the child to execute. Writable
-materializations are quota-backed; read-only inputs are descriptor-pinned.
+materializations are quota-backed; retained copies use persistent hard-sized
+ext4 loop images while ephemeral copies use tmpfs. Read-only inputs are
+descriptor-pinned.
 macOS constructs a deny-default sandbox profile and applies it before executing
 the child.
 
@@ -96,14 +98,21 @@ public control methods provide capability discovery, canonical plan validation,
 durable create/status operations, bounded receipt pages, and exact
 acknowledgement.
 
+When Sage configures `glove_activation_mode = "user_service"`, `saged` first
+asks the platform user service manager to start the fixed local Glove unit. It
+waits for `gloved.sock` and `bootstrap-secret` before health and capability
+negotiation. The service label comes only from local Sage configuration and is
+restricted to a bounded identifier; remote requests cannot select a process,
+unit, or executable. `connect_only` preserves externally managed deployments.
+
 When the Linux runtime is configured, the control service executes this
 lifecycle:
 
 1. Validate the canonical identifier-only plan against local policy.
 2. Persist the plan and both the controller BLAKE3 digest and Glove SHA-256
    content digest.
-3. Reserve a non-direct-write session for preparation.
-4. Resolve path aliases and library bundles through pinned descriptors.
+3. Reserve a session for preparation; live host writes are never eligible.
+4. Resolve generation-bound exposures and library bundles through pinned descriptors.
 5. Compose mounts, cgroup limits, output accounting, and an immutable launch
    binding.
 6. Start and recover the child through the executor and reconciler.
@@ -111,9 +120,9 @@ lifecycle:
 
 The local protocol exposes attach, input, resize, signal, detach, stop, and
 cleanup only when the runtime is constructed. Sage now wires that lifecycle and
-receipt reconciliation, while production service ownership, prompt-library
-expansion, and a distinct local direct-write approval record remain
-remote-launch gates.
+receipt reconciliation. Exposure create/revoke remains owner-local; peers may
+receive only the redacted catalog. Retained-change inspection and independently
+authorized apply remain separate launch gates.
 
 ## Library projection
 

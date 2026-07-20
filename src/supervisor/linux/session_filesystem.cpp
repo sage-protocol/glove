@@ -1,5 +1,6 @@
 #include "glove/supervisor/linux_session_filesystem.hpp"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/mount.h>
 #include <sys/stat.h>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -84,14 +86,33 @@ auto errno_message(int error) -> std::string {
     return std::error_code{error, std::generic_category()}.message();
 }
 
+constexpr std::size_t max_orphan_entries = 10'000U;
+
+struct materialization_identity {
+    std::string session_id;
+    std::string alias;
+
+    auto operator<=>(const materialization_identity&) const = default;
+};
+
 class unique_fd {
 public:
     explicit unique_fd(int descriptor = -1) noexcept : descriptor_{descriptor} {}
 
     unique_fd(const unique_fd&) = delete;
     auto operator=(const unique_fd&) -> unique_fd& = delete;
-    unique_fd(unique_fd&&) = delete;
-    auto operator=(unique_fd&&) -> unique_fd& = delete;
+
+    unique_fd(unique_fd&& other) noexcept : descriptor_{std::exchange(other.descriptor_, -1)} {}
+
+    auto operator=(unique_fd&& other) noexcept -> unique_fd& {
+        if (this != &other) {
+            if (descriptor_ >= 0) {
+                ::close(descriptor_);
+            }
+            descriptor_ = std::exchange(other.descriptor_, -1);
+        }
+        return *this;
+    }
 
     ~unique_fd() {
         if (descriptor_ >= 0) {
@@ -106,6 +127,187 @@ public:
 private:
     int descriptor_ = -1;
 };
+
+class unique_directory {
+public:
+    explicit unique_directory(::DIR* directory = nullptr) noexcept : directory_{directory} {}
+
+    unique_directory(const unique_directory&) = delete;
+    auto operator=(const unique_directory&) -> unique_directory& = delete;
+
+    ~unique_directory() {
+        if (directory_ != nullptr) {
+            ::closedir(directory_);
+        }
+    }
+
+    [[nodiscard]] auto get() const noexcept -> ::DIR* { return directory_; }
+
+private:
+    ::DIR* directory_;
+};
+
+result<unique_fd> open_owner_only_root(std::string_view raw) {
+    const std::filesystem::path path{raw};
+    if (!path.is_absolute() || path == path.root_path() || path.lexically_normal() != path) {
+        return std::unexpected(std::string{"invalid materialization root"});
+    }
+    unique_fd current{::open("/", O_PATH | O_DIRECTORY | O_CLOEXEC)};
+    if (current.get() < 0) {
+        return std::unexpected(std::string{"open materialization root: "} + errno_message(errno));
+    }
+    for (const auto& component : path.relative_path()) {
+        const auto name = component.string();
+        unique_fd next{
+            ::openat(current.get(), name.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        };
+        if (next.get() < 0) {
+            return std::unexpected(
+                std::string{"resolve materialization root: "} + errno_message(errno)
+            );
+        }
+        current = std::move(next);
+    }
+    unique_fd root{::openat(current.get(), ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+    struct stat status{};
+    if (root.get() < 0 || ::fstat(root.get(), &status) != 0 || !S_ISDIR(status.st_mode) ||
+        status.st_uid != ::geteuid() || (status.st_mode & 0077U) != 0) {
+        return std::unexpected(std::string{"materialization root must be an owner-only directory"});
+    }
+    return root;
+}
+
+auto parse_size(std::string_view value) -> std::optional<std::size_t> {
+    if (value.empty() || (value.size() > 1U && value.front() == '0')) {
+        return std::nullopt;
+    }
+    std::size_t parsed = 0;
+    const auto conversion = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (conversion.ec != std::errc{} || conversion.ptr != value.data() + value.size() ||
+        parsed == 0 || parsed > 64U) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+auto consume_length_prefixed(std::string_view& input, char marker) -> std::optional<std::string> {
+    if (input.size() < 3U || input.front() != marker) {
+        return std::nullopt;
+    }
+    input.remove_prefix(1);
+    const auto separator = input.find('-');
+    if (separator == std::string_view::npos) {
+        return std::nullopt;
+    }
+    auto length = parse_size(input.substr(0, separator));
+    if (!length) {
+        return std::nullopt;
+    }
+    input.remove_prefix(separator + 1U);
+    if (input.size() < *length) {
+        return std::nullopt;
+    }
+    std::string value{input.substr(0, *length)};
+    input.remove_prefix(*length);
+    if (!valid_recovery_identifier(value)) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+auto parse_partition_name(std::string_view name) -> std::optional<materialization_identity> {
+    constexpr std::string_view prefix = "glove-mat-";
+    if (!name.starts_with(prefix)) {
+        return std::nullopt;
+    }
+    name.remove_prefix(prefix.size());
+    auto session_id = consume_length_prefixed(name, 's');
+    if (!session_id || !name.starts_with("-a")) {
+        return std::nullopt;
+    }
+    name.remove_prefix(1);
+    auto alias = consume_length_prefixed(name, 'a');
+    if (!alias || !name.empty()) {
+        return std::nullopt;
+    }
+    return materialization_identity{std::move(*session_id), std::move(*alias)};
+}
+
+auto parse_scratch_name(std::string_view name) -> std::optional<materialization_identity> {
+    constexpr std::string_view prefix = "glove-sessionfs-";
+    if (!name.starts_with(prefix)) {
+        return std::nullopt;
+    }
+    name.remove_prefix(prefix.size());
+    auto session_id = consume_length_prefixed(name, 's');
+    if (!session_id || !name.empty()) {
+        return std::nullopt;
+    }
+    return materialization_identity{std::move(*session_id), "__scratch"};
+}
+
+auto parse_metadata_name(std::string_view name) -> std::optional<materialization_identity> {
+    if (name.ends_with(".pending")) {
+        name.remove_suffix(std::string_view{".pending"}.size());
+    }
+    constexpr std::string_view suffix = ".json";
+    constexpr std::string_view prefix = "glove-retained-meta-";
+    if (!name.starts_with(prefix) || !name.ends_with(suffix)) {
+        return std::nullopt;
+    }
+    name.remove_prefix(prefix.size());
+    name.remove_suffix(suffix.size());
+    auto session_id = consume_length_prefixed(name, 's');
+    if (!session_id || !name.starts_with("-a")) {
+        return std::nullopt;
+    }
+    name.remove_prefix(1);
+    auto alias = consume_length_prefixed(name, 'a');
+    if (!alias || !name.empty()) {
+        return std::nullopt;
+    }
+    return materialization_identity{std::move(*session_id), std::move(*alias)};
+}
+
+auto list_root_entries(int root_fd) -> result<std::vector<std::string>> {
+    unique_fd iterator_fd{::fcntl(root_fd, F_DUPFD_CLOEXEC, 0)};
+    if (iterator_fd.get() < 0) {
+        return std::unexpected(
+            std::string{"duplicate materialization root: "} + errno_message(errno)
+        );
+    }
+    ::DIR* raw = ::fdopendir(iterator_fd.get());
+    if (raw == nullptr) {
+        return std::unexpected(
+            std::string{"iterate materialization root: "} + errno_message(errno)
+        );
+    }
+    static_cast<void>(iterator_fd.release());
+    unique_directory directory{raw};
+    std::vector<std::string> entries;
+    for (;;) {
+        errno = 0;
+        const auto* entry = ::readdir(directory.get());
+        if (entry == nullptr) {
+            if (errno != 0) {
+                return std::unexpected(
+                    std::string{"read materialization root: "} + errno_message(errno)
+                );
+            }
+            break;
+        }
+        const std::string_view name{entry->d_name};
+        if (name == "." || name == "..") {
+            continue;
+        }
+        if (entries.size() >= max_orphan_entries) {
+            return std::unexpected(std::string{"materialization root entry bound exceeded"});
+        }
+        entries.emplace_back(name);
+    }
+    std::ranges::sort(entries);
+    return entries;
+}
 
 auto clone_mount_descriptor(int source_fd) -> result<int> {
     const int descriptor = static_cast<int>(
@@ -149,9 +351,16 @@ auto validate_grants(
                                     grant.materialization() == path_materialization::copy &&
                                     grant.cleanup_policy() == path_cleanup_policy::remove &&
                                     grant.max_bytes() != 0 && grant.max_bytes() % page_bytes == 0;
-        if ((!read_bind && !ephemeral_copy) || !valid_target(grant.target_path()) ||
+        const bool retained_copy = grant.access() == path_access::retained_write &&
+                                   grant.materialization() == path_materialization::copy &&
+                                   grant.cleanup_policy() == path_cleanup_policy::retain &&
+                                   grant.max_bytes() != 0 && grant.max_bytes() % page_bytes == 0 &&
+                                   grant.exposure_generation() != 0 &&
+                                   !grant.exposure_scope_digest().empty();
+        if ((!read_bind && !ephemeral_copy && !retained_copy) ||
+            !valid_target(grant.target_path()) ||
             !aliases.insert(std::string{grant.alias()}).second ||
-            (ephemeral_copy && !checked_add(allocated, grant.max_bytes()))) {
+            ((ephemeral_copy || retained_copy) && !checked_add(allocated, grant.max_bytes()))) {
             return std::unexpected(std::string{"invalid session filesystem grant set"});
         }
         const std::filesystem::path target{grant.target_path()};
@@ -502,6 +711,7 @@ result<void> linux_session_filesystem::cleanup_recovered(
     for (const auto& partition : partitions) {
         auto adopted = ephemeral_copy_materialization::adopt_recovered(
             materialization_root,
+            session_id,
             partition_directory_name(session_id, partition.alias),
             partition.alias,
             partition.quota_bytes
@@ -515,6 +725,7 @@ result<void> linux_session_filesystem::cleanup_recovered(
     }
     auto scratch = ephemeral_copy_materialization::adopt_recovered(
         materialization_root,
+        session_id,
         scratch_directory_name(session_id),
         "__scratch",
         disk_limit_bytes - allocated
@@ -525,11 +736,16 @@ result<void> linux_session_filesystem::cleanup_recovered(
     if (*scratch) {
         recovered.push_back(std::move(**scratch));
     }
-    for (auto& materialization : recovered) {
-        materialization.arm_recovered_cleanup();
-    }
     std::string first_error;
     for (auto& materialization : recovered) {
+        auto finalized = materialization.finalize_retained();
+        if (!finalized) {
+            if (first_error.empty()) {
+                first_error = finalized.error();
+            }
+            continue;
+        }
+        materialization.arm_recovered_cleanup();
         if (auto cleaned = materialization.cleanup(); !cleaned && first_error.empty()) {
             first_error = cleaned.error();
         }
@@ -538,6 +754,103 @@ result<void> linux_session_filesystem::cleanup_recovered(
         return std::unexpected(std::move(first_error));
     }
     return {};
+}
+
+result<orphaned_materialization_report> linux_session_filesystem::sweep_orphaned(
+    std::string_view materialization_root, const std::vector<std::string>& protected_session_ids
+) {
+    std::set<std::string> protected_sessions;
+    for (const auto& session_id : protected_session_ids) {
+        if (!valid_recovery_identifier(session_id) ||
+            !protected_sessions.insert(session_id).second) {
+            return std::unexpected(std::string{"invalid protected session inventory"});
+        }
+    }
+    auto root = open_owner_only_root(materialization_root);
+    if (!root) {
+        return std::unexpected(root.error());
+    }
+    auto entries = list_root_entries(root->get());
+    if (!entries) {
+        return std::unexpected(entries.error());
+    }
+
+    orphaned_materialization_report report;
+    std::set<materialization_identity> processed;
+    const auto recover = [&](const materialization_identity& identity,
+                             std::string directory_name) -> result<void> {
+        if (protected_sessions.contains(identity.session_id) || processed.contains(identity)) {
+            return {};
+        }
+        auto recovered = ephemeral_copy_materialization::recover_orphaned(
+            materialization_root, identity.session_id, std::move(directory_name), identity.alias
+        );
+        if (!recovered) {
+            return std::unexpected(recovered.error());
+        }
+        processed.insert(identity);
+        ++report.inspected;
+        if (*recovered) {
+            report.recovered_retained_changes.push_back(std::move(**recovered));
+        } else {
+            ++report.removed_without_stage;
+        }
+        return {};
+    };
+
+    for (const auto& name : *entries) {
+        auto identity = parse_partition_name(name);
+        if (!identity) {
+            identity = parse_scratch_name(name);
+        }
+        if (!identity || protected_sessions.contains(identity->session_id)) {
+            continue;
+        }
+        struct stat status{};
+        if (::fstatat(root->get(), name.c_str(), &status, AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno == ENOENT) {
+                continue;
+            }
+            return std::unexpected(
+                std::string{"inspect orphaned materialization: "} + errno_message(errno)
+            );
+        }
+        if (!S_ISDIR(status.st_mode) || status.st_uid != ::geteuid()) {
+            return std::unexpected(std::string{"orphaned materialization entry is invalid"});
+        }
+        if (auto recovered = recover(*identity, name); !recovered) {
+            return std::unexpected(recovered.error());
+        }
+    }
+
+    // A crash can occur after creating the persistent sidecars but before or
+    // after publishing the mountpoint. A second pass covers those exact cases.
+    entries = list_root_entries(root->get());
+    if (!entries) {
+        return std::unexpected(entries.error());
+    }
+    for (const auto& name : *entries) {
+        std::optional<materialization_identity> identity;
+        if (std::string_view{name}.ends_with(".ext4")) {
+            identity = parse_partition_name(
+                std::string_view{name}.substr(0, name.size() - std::string_view{".ext4"}.size())
+            );
+        } else {
+            identity = parse_metadata_name(name);
+        }
+        if (!identity || protected_sessions.contains(identity->session_id) ||
+            processed.contains(*identity)) {
+            continue;
+        }
+        const auto directory_name = partition_directory_name(identity->session_id, identity->alias);
+        if (auto recovered = recover(*identity, directory_name); !recovered) {
+            return std::unexpected(recovered.error());
+        }
+    }
+    std::ranges::sort(
+        report.recovered_retained_changes, {}, &retained_change_manifest::exposure_id
+    );
+    return report;
 }
 
 auto linux_session_filesystem::mounts() const -> std::vector<session_mount> {
@@ -596,6 +909,30 @@ result<session_filesystem_usage> linux_session_filesystem::observe() const {
     return usage;
 }
 
+result<std::vector<retained_change_manifest>>
+linux_session_filesystem::finalize_retained_changes() {
+    if (!active_) {
+        return std::unexpected(std::string{"session filesystem is not active"});
+    }
+    if (!retained_manifests_.empty()) {
+        return retained_manifests_;
+    }
+    std::vector<retained_change_manifest> finalized_manifests;
+    finalized_manifests.reserve(materializations_.size());
+    for (auto& materialization : materializations_) {
+        auto manifest = materialization.finalize_retained();
+        if (!manifest) {
+            return std::unexpected(manifest.error());
+        }
+        if (*manifest) {
+            finalized_manifests.push_back(std::move(**manifest));
+        }
+    }
+    std::ranges::sort(finalized_manifests, {}, &retained_change_manifest::exposure_id);
+    retained_manifests_ = std::move(finalized_manifests);
+    return retained_manifests_;
+}
+
 void linux_session_filesystem::close_scratch_descriptors() noexcept {
     if (tmp_fd_ >= 0) {
         ::close(tmp_fd_);
@@ -616,6 +953,9 @@ result<void> linux_session_filesystem::cleanup() {
     close_scratch_descriptors();
     if (!active_) {
         return {};
+    }
+    if (auto finalized = finalize_retained_changes(); !finalized) {
+        return std::unexpected(finalized.error());
     }
     std::string first_error;
     for (auto& materialization : materializations_) {

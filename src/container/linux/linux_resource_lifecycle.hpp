@@ -31,6 +31,7 @@ struct linux_resource_terminal_observation {
     std::uint64_t started_at_ms = 0;
     std::uint64_t finished_at_ms = 0;
     bool termination_callback_failed = false;
+    std::vector<supervisor::retained_change_manifest> retained_changes;
 
     auto operator==(const linux_resource_terminal_observation&) const -> bool = default;
 };

@@ -108,6 +108,27 @@ struct library_projection_receipt {
     auto operator==(const library_projection_receipt&) const -> bool = default;
 };
 
+// Redacted evidence for one retained, isolated workspace finalized at session
+// exit. The manifest digest commits to the bounded path-level consequences;
+// no host path or protected-root identifier is present.
+struct retained_change_receipt {
+    std::string exposure_id;
+    std::uint64_t generation = 0;
+    std::string scope_digest;
+    std::string source_identity_digest;
+    std::string baseline_tree_digest;
+    std::string staged_tree_digest;
+    std::string manifest_digest;
+    std::uint64_t created = 0;
+    std::uint64_t modified = 0;
+    std::uint64_t renamed = 0;
+    std::uint64_t removed = 0;
+    std::uint64_t before_bytes = 0;
+    std::uint64_t after_bytes = 0;
+
+    auto operator==(const retained_change_receipt&) const -> bool = default;
+};
+
 // Version-1 receipt returned only after a mandatory-limit process reaches a
 // terminal state. The profile digest binds the receipt to the immutable launch
 // profile; the configured limits and mechanisms prevent a caller from treating
@@ -125,6 +146,7 @@ struct resource_enforcement_receipt {
     std::uint64_t started_at_ms = 0;
     std::uint64_t finished_at_ms = 0;
     std::vector<library_projection_receipt> library_projections;
+    std::vector<retained_change_receipt> retained_changes;
 
     auto operator==(const resource_enforcement_receipt&) const -> bool = default;
 };

@@ -15,6 +15,8 @@ template<typename Value> using result = std::expected<Value, std::string>;
 enum class path_access : std::uint8_t {
     read,
     ephemeral_write,
+    retained_write,
+    // Legacy v1 policy value. It is validation-only and cannot be resolved.
     direct_write,
 };
 
@@ -117,12 +119,25 @@ public:
 
     [[nodiscard]] auto identity() const noexcept -> path_identity { return identity_; }
 
+    [[nodiscard]] auto exposure_generation() const noexcept -> std::uint64_t {
+        return exposure_generation_;
+    }
+
+    [[nodiscard]] auto exposure_scope_digest() const noexcept -> std::string_view {
+        return exposure_scope_digest_;
+    }
+
+    [[nodiscard]] auto source_identity_digest() const noexcept -> std::string_view {
+        return source_identity_digest_;
+    }
+
     // Re-open through the host-configured component chain with O_NOFOLLOW and
     // reject if the object at the alias changed after planning.
     [[nodiscard]] auto verify_identity() const -> std::expected<void, std::string>;
 
 private:
     friend class path_alias_registry;
+    friend class path_exposure_registry;
 
     resolved_path_grant(
         int descriptor_fd,
@@ -131,7 +146,10 @@ private:
         std::string target_path,
         const path_access_policy& policy,
         const path_grant_request& request,
-        path_identity identity
+        path_identity identity,
+        std::uint64_t exposure_generation = 0,
+        std::string exposure_scope_digest = {},
+        std::string source_identity_digest = {}
     );
 
     void close_descriptor() noexcept;
@@ -147,6 +165,9 @@ private:
     std::uint64_t ttl_secs_ = 0;
     std::uint64_t max_bytes_ = 0;
     path_identity identity_;
+    std::uint64_t exposure_generation_ = 0;
+    std::string exposure_scope_digest_;
+    std::string source_identity_digest_;
 };
 
 class path_alias_registry {

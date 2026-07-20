@@ -95,6 +95,7 @@ auto receipt(std::uint64_t cpu_time_ms = 500) -> glove::container::resource_enfo
         .started_at_ms = 1'000,
         .finished_at_ms = 1'750,
         .library_projections = {},
+        .retained_changes = {},
     };
 }
 

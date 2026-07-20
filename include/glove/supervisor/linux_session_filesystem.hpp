@@ -1,5 +1,6 @@
 #pragma once
 
+#include "glove/supervisor/change_manifest.hpp"
 #include "glove/supervisor/library_bundle.hpp"
 #include "glove/supervisor/linux_ephemeral_copy.hpp"
 #include "glove/supervisor/path_alias.hpp"
@@ -41,9 +42,16 @@ struct recovered_quota_partition {
     auto operator==(const recovered_quota_partition&) const -> bool = default;
 };
 
+struct orphaned_materialization_report {
+    std::size_t inspected = 0;
+    std::size_t removed_without_stage = 0;
+    std::vector<retained_change_manifest> recovered_retained_changes;
+};
+
 // Owns every filesystem exposed to one session. Read grants remain pinned,
 // descriptor-cloned host objects and consume no write quota. Each ephemeral
-// write alias keeps its host-configured quota and the remaining capacity backs
+// write alias keeps its host-configured quota (tmpfs for ephemeral copies,
+// durable ext4 images for retained copies), and the remaining capacity backs
 // shared /tmp and /var/tmp directories. Because writable partition capacities
 // sum exactly to the session limit, aggregate writes cannot exceed that limit.
 class linux_session_filesystem {
@@ -73,6 +81,14 @@ public:
         const std::vector<recovered_quota_partition>& partitions
     );
 
+    // Startup-only recovery for a crash that occurred after a deterministic
+    // materialization was created but before its identity reached the session
+    // registry. Only exact Glove-owned names are considered. Active registry
+    // sessions and published retained stages are never touched.
+    [[nodiscard]] static result<orphaned_materialization_report> sweep_orphaned(
+        std::string_view materialization_root, const std::vector<std::string>& protected_session_ids
+    );
+
     [[nodiscard]] auto mounts() const -> std::vector<session_mount>;
 
     [[nodiscard]] auto disk_limit_bytes() const noexcept -> std::uint64_t {
@@ -81,6 +97,7 @@ public:
 
     [[nodiscard]] auto recovery_partitions() const -> std::vector<recovered_quota_partition>;
     [[nodiscard]] result<session_filesystem_usage> observe() const;
+    [[nodiscard]] result<std::vector<retained_change_manifest>> finalize_retained_changes();
     [[nodiscard]] result<void> cleanup();
 
 private:
@@ -102,6 +119,7 @@ private:
     int var_tmp_fd_ = -1;
     std::vector<ephemeral_copy_materialization> materializations_;
     std::vector<session_mount> mounts_;
+    std::vector<retained_change_manifest> retained_manifests_;
     bool active_ = true;
 };
 

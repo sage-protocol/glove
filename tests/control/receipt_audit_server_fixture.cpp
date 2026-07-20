@@ -56,17 +56,19 @@ auto receipt() -> glove::container::resource_enforcement_receipt {
         .exit_code = 0,
         .started_at_ms = 1'000,
         .finished_at_ms = 1'750,
-        .library_projections = {
-            library_projection_receipt{
-                .projection_id = "library-main",
-                .destination_alias = "codex-skills",
-                .target_path =
-                    "/opt/sage/codex-skills/"
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
-                .content_digest =
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .library_projections =
+            {
+                library_projection_receipt{
+                    .projection_id = "library-main",
+                    .destination_alias = "codex-skills",
+                    .target_path =
+                        "/opt/sage/codex-skills/"
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+                    .content_digest =
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                },
             },
-        },
+        .retained_changes = {},
     };
 }
 
@@ -200,6 +202,8 @@ auto run(int argc, char** argv) -> int {
         .plan_validator = std::move(shared_validator),
         .sessions = std::shared_ptr<glove::control::session_registry>{std::move(*sessions)},
         .session_runtime = {},
+        .path_exposures = {},
+        .materialization_root = {},
         .io_timeout_ms = 5'000,
     });
     if (!server) {

@@ -35,6 +35,17 @@ struct path_grant {
     std::string cleanup_policy;
 };
 
+struct path_exposure_grant {
+    std::string exposure_id;
+    std::uint64_t generation = 0;
+    std::string scope_digest;
+    std::string access;
+    std::string materialization;
+    std::uint64_t max_bytes = 0;
+    std::uint64_t ttl_secs = 0;
+    std::string cleanup_policy;
+};
+
 struct library_projection {
     std::string projection_id;
     std::string content_digest;
@@ -55,6 +66,26 @@ struct session_plan {
     resource_limits limits;
     std::uint64_t policy_revision = 0;
     std::uint64_t expires_at_ms = 0;
+};
+
+struct session_plan_v2 {
+    std::uint8_t schema_version = 0;
+    std::string runtime_id;
+    std::string runtime_template_id;
+    std::string adapter_command_digest;
+    std::string sandbox_backend;
+    std::string egress_policy_id;
+    std::string tool_policy_id;
+    std::vector<path_exposure_grant> path_grants;
+    std::vector<library_projection> library_projections;
+    std::vector<std::string> secret_handles;
+    resource_limits limits;
+    std::uint64_t policy_revision = 0;
+    std::uint64_t expires_at_ms = 0;
+};
+
+struct session_plan_header {
+    std::uint8_t schema_version = 0;
 };
 
 struct path_access_policy {
@@ -127,6 +158,7 @@ struct session_plan_policy {
 namespace {
 
 constexpr glz::opts strict_read_options{.error_on_unknown_keys = true};
+constexpr glz::opts header_read_options{.error_on_unknown_keys = false};
 constexpr std::size_t max_identifier_bytes = 128U;
 constexpr std::size_t max_path_grants = 64U;
 constexpr std::size_t max_library_projections = 128U;
@@ -385,6 +417,9 @@ auto parse_access(std::string_view value) -> std::expected<path_access, std::str
     if (value == "ephemeral_write") {
         return path_access::ephemeral_write;
     }
+    if (value == "retained_write") {
+        return path_access::retained_write;
+    }
     if (value == "direct_write") {
         return path_access::direct_write;
     }
@@ -531,6 +566,11 @@ auto validate_path_projection(
         if (!access || !materialization || !cleanup) {
             return std::unexpected(std::string{"session path grant has unknown policy values"});
         }
+        if (*access == path_access::retained_write) {
+            return std::unexpected(
+                std::string{"retained-write requires a versioned v2 exposure grant"}
+            );
+        }
         auto valid = paths.validate_plan(
             path_grant_plan_request{
                 .grant =
@@ -549,6 +589,78 @@ auto validate_path_projection(
         }
     }
     return {};
+}
+
+auto validate_path_projection(
+    const wire::session_plan_v2& plan,
+    const runtime_template_policy& runtime,
+    const path_exposure_registry* exposures,
+    std::uint64_t now_ms
+) -> std::expected<void, std::string> {
+    if (exposures == nullptr) {
+        return std::unexpected(std::string{"path exposure registry is unavailable"});
+    }
+    if (!canonical_unique(plan.path_grants, [](const auto& grant) -> std::string_view {
+            return grant.exposure_id;
+        })) {
+        return std::unexpected(std::string{"session exposure grants are not canonical"});
+    }
+    const auto remaining_ttl_ms = plan.expires_at_ms - now_ms;
+    const auto remaining_ttl_secs =
+        remaining_ttl_ms / 1'000U + static_cast<std::uint64_t>(remaining_ttl_ms % 1'000U != 0);
+    for (const auto& grant : plan.path_grants) {
+        auto access = parse_access(grant.access);
+        auto materialization = parse_materialization(grant.materialization);
+        auto cleanup = parse_cleanup(grant.cleanup_policy);
+        if (!access || !materialization || !cleanup || grant.ttl_secs > remaining_ttl_secs) {
+            return std::unexpected(std::string{"session exposure grant is invalid"});
+        }
+        auto valid = exposures->validate_grant(
+            path_exposure_grant{
+                .exposure_id = grant.exposure_id,
+                .generation = grant.generation,
+                .scope_digest = grant.scope_digest,
+                .access = *access,
+                .materialization = *materialization,
+                .max_bytes = grant.max_bytes,
+                .ttl_secs = grant.ttl_secs,
+                .cleanup_policy = *cleanup,
+            },
+            runtime.runtime_template_id,
+            now_ms
+        );
+        if (!valid) {
+            return std::unexpected(valid.error());
+        }
+    }
+    return {};
+}
+
+auto plan_schema_version(std::string_view plan_json) -> result<std::uint8_t> {
+    wire::session_plan_header header;
+    if (const auto error = glz::read<header_read_options>(header, plan_json);
+        error || header.schema_version == 0) {
+        return std::unexpected(std::string{"invalid session plan schema"});
+    }
+    return header.schema_version;
+}
+
+auto common_v1_plan(const wire::session_plan_v2& plan) -> wire::session_plan {
+    return wire::session_plan{
+        .schema_version = 1,
+        .runtime_id = plan.runtime_id,
+        .runtime_template_id = plan.runtime_template_id,
+        .adapter_command_digest = plan.adapter_command_digest,
+        .sandbox_backend = plan.sandbox_backend,
+        .egress_policy_id = plan.egress_policy_id,
+        .tool_policy_id = plan.tool_policy_id,
+        .path_grants = {},
+        .library_projections = plan.library_projections,
+        .secret_handles = plan.secret_handles,
+        .limits = plan.limits,
+        .policy_revision = plan.policy_revision,
+        .expires_at_ms = plan.expires_at_ms,
+    };
 }
 
 auto validate_library_projection(
@@ -603,8 +715,10 @@ auto runtime_launch_template_digest(const runtime_launch_template& launch) -> re
     return container::sha256_hex(encoder.bytes());
 }
 
-auto session_plan_validator::load(const std::filesystem::path& policy_path)
-    -> result<session_plan_validator> {
+auto session_plan_validator::load(
+    const std::filesystem::path& policy_path,
+    std::shared_ptr<const path_exposure_registry> exposures
+) -> result<session_plan_validator> {
     auto contents = load_policy_file(policy_path);
     if (!contents) {
         return std::unexpected(contents.error());
@@ -714,12 +828,16 @@ auto session_plan_validator::load(const std::filesystem::path& policy_path)
             .tool_policy_ids = std::move(encoded.tool_policy_ids),
             .secret_handles = std::move(encoded.secret_handles),
         },
-        std::move(*path_registry)
+        std::move(*path_registry),
+        std::move(exposures)
     );
 }
 
-auto session_plan_validator::build(session_plan_policy policy, path_alias_registry paths)
-    -> result<session_plan_validator> {
+auto session_plan_validator::build(
+    session_plan_policy policy,
+    path_alias_registry paths,
+    std::shared_ptr<const path_exposure_registry> exposures
+) -> result<session_plan_validator> {
     if (policy.revision == 0 || policy.max_plan_ttl_ms == 0 || policy.runtime_templates.empty() ||
         policy.runtime_templates.size() > max_runtime_templates || paths.size() == 0 ||
         paths.size() > max_path_grants || policy.resource_profiles.empty() ||
@@ -764,11 +882,48 @@ auto session_plan_validator::build(session_plan_policy policy, path_alias_regist
     session_plan_validator validator;
     validator.policy_ = std::move(policy);
     validator.paths_ = std::move(paths);
+    validator.exposures_ = std::move(exposures);
     return validator;
 }
 
 auto session_plan_validator::validate_json(std::string_view plan_json, std::uint64_t now_ms) const
     -> result<session_plan_validation> {
+    auto schema = plan_schema_version(plan_json);
+    if (!schema) {
+        return std::unexpected(schema.error());
+    }
+    if (*schema == 2) {
+        wire::session_plan_v2 plan;
+        if (const auto error = glz::read<strict_read_options>(plan, plan_json);
+            error || plan.schema_version != 2 || plan.path_grants.size() > max_path_grants) {
+            return std::unexpected(std::string{"invalid session plan v2 schema"});
+        }
+        auto common_json = glz::write_json(common_v1_plan(plan));
+        if (!common_json) {
+            return std::unexpected(std::string{"session plan validation encoding failed"});
+        }
+        if (auto common = validate_json(*common_json, now_ms); !common) {
+            return std::unexpected(common.error());
+        }
+        const auto runtime =
+            std::ranges::find_if(policy_.runtime_templates, [&](const auto& candidate) {
+                return candidate.runtime_template_id == plan.runtime_template_id;
+            });
+        if (runtime == policy_.runtime_templates.end()) {
+            return std::unexpected(std::string{"session plan runtime projection is unavailable"});
+        }
+        if (auto paths = validate_path_projection(plan, *runtime, exposures_.get(), now_ms);
+            !paths) {
+            return std::unexpected(paths.error());
+        }
+        return session_plan_validation{
+            .schema_version = 2,
+            .policy_revision = policy_.revision,
+        };
+    }
+    if (*schema != 1) {
+        return std::unexpected(std::string{"unsupported session plan schema"});
+    }
     wire::session_plan plan;
     if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
         return std::unexpected(std::string{"invalid session plan schema"});
@@ -829,6 +984,21 @@ auto session_plan_validator::canonicalize_json(
     if (!validation) {
         return std::unexpected(validation.error());
     }
+    if (validation->schema_version == 2) {
+        wire::session_plan_v2 plan;
+        if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
+            return std::unexpected(std::string{"invalid session plan v2 schema"});
+        }
+        auto canonical_json = glz::write_json(plan);
+        if (!canonical_json) {
+            return std::unexpected(std::string{"session plan canonical encoding failed"});
+        }
+        return validated_session_plan_document{
+            .validation = *validation,
+            .expires_at_ms = plan.expires_at_ms,
+            .canonical_json = std::move(*canonical_json),
+        };
+    }
     wire::session_plan plan;
     if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
         return std::unexpected(std::string{"invalid session plan schema"});
@@ -852,7 +1022,13 @@ auto session_plan_validator::resolve_runtime_launch_json(
         return std::unexpected(validation.error());
     }
     wire::session_plan plan;
-    if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
+    if (validation->schema_version == 2) {
+        wire::session_plan_v2 v2;
+        if (const auto error = glz::read<strict_read_options>(v2, plan_json); error) {
+            return std::unexpected(std::string{"invalid session plan v2 schema"});
+        }
+        plan = common_v1_plan(v2);
+    } else if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
         return std::unexpected(std::string{"invalid session plan schema"});
     }
     const auto runtime =
@@ -878,6 +1054,7 @@ auto session_plan_validator::resolve_runtime_launch_json(
         .limits = plan.limits,
         .expires_at_ms = plan.expires_at_ms,
         .requires_direct_write_approval =
+            validation->schema_version == 1 &&
             std::ranges::any_of(plan.path_grants, [](const auto& grant) {
                 return grant.access == "direct_write";
             }),
@@ -890,6 +1067,42 @@ auto session_plan_validator::resolve_path_grants_json(
     auto validation = validate_json(plan_json, now_ms);
     if (!validation) {
         return std::unexpected(validation.error());
+    }
+    if (validation->schema_version == 2) {
+        wire::session_plan_v2 plan;
+        if (const auto error = glz::read<strict_read_options>(plan, plan_json);
+            error || !exposures_) {
+            return std::unexpected(std::string{"invalid session plan v2 path grants"});
+        }
+        std::vector<resolved_path_grant> resolved;
+        resolved.reserve(plan.path_grants.size());
+        for (const auto& grant : plan.path_grants) {
+            auto access = parse_access(grant.access);
+            auto materialization = parse_materialization(grant.materialization);
+            auto cleanup = parse_cleanup(grant.cleanup_policy);
+            if (!access || !materialization || !cleanup) {
+                return std::unexpected(std::string{"session exposure grant is invalid"});
+            }
+            auto path = exposures_->resolve_grant(
+                path_exposure_grant{
+                    .exposure_id = grant.exposure_id,
+                    .generation = grant.generation,
+                    .scope_digest = grant.scope_digest,
+                    .access = *access,
+                    .materialization = *materialization,
+                    .max_bytes = grant.max_bytes,
+                    .ttl_secs = grant.ttl_secs,
+                    .cleanup_policy = *cleanup,
+                },
+                plan.runtime_template_id,
+                now_ms
+            );
+            if (!path) {
+                return std::unexpected(path.error());
+            }
+            resolved.push_back(std::move(*path));
+        }
+        return resolved;
     }
     wire::session_plan plan;
     if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
@@ -925,13 +1138,23 @@ auto session_plan_validator::resolve_library_projections_json(
     if (!validation) {
         return std::unexpected(validation.error());
     }
-    wire::session_plan plan;
-    if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
-        return std::unexpected(std::string{"invalid session plan schema"});
-    }
     std::vector<library_bundle_projection> projections;
-    projections.reserve(plan.library_projections.size());
-    for (auto& projection : plan.library_projections) {
+    std::vector<wire::library_projection> encoded;
+    if (validation->schema_version == 2) {
+        wire::session_plan_v2 plan;
+        if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
+            return std::unexpected(std::string{"invalid session plan v2 schema"});
+        }
+        encoded = std::move(plan.library_projections);
+    } else {
+        wire::session_plan plan;
+        if (const auto error = glz::read<strict_read_options>(plan, plan_json); error) {
+            return std::unexpected(std::string{"invalid session plan schema"});
+        }
+        encoded = std::move(plan.library_projections);
+    }
+    projections.reserve(encoded.size());
+    for (auto& projection : encoded) {
         projections.push_back({
             .projection_id = std::move(projection.projection_id),
             .content_digest = std::move(projection.content_digest),

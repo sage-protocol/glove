@@ -1612,7 +1612,26 @@ auto make_managed_receipt(
         .started_at_ms = terminal.started_at_ms,
         .finished_at_ms = terminal.finished_at_ms,
         .library_projections = binding.library_projections,
+        .retained_changes = {},
     };
+    receipt.retained_changes.reserve(terminal.retained_changes.size());
+    for (const auto& manifest : terminal.retained_changes) {
+        receipt.retained_changes.push_back({
+            .exposure_id = manifest.exposure_id,
+            .generation = manifest.generation,
+            .scope_digest = manifest.scope_digest,
+            .source_identity_digest = manifest.source_identity_digest,
+            .baseline_tree_digest = manifest.baseline_tree_digest,
+            .staged_tree_digest = manifest.staged_tree_digest,
+            .manifest_digest = manifest.manifest_digest,
+            .created = manifest.created,
+            .modified = manifest.modified,
+            .renamed = manifest.renamed,
+            .removed = manifest.removed,
+            .before_bytes = manifest.before_bytes,
+            .after_bytes = manifest.after_bytes,
+        });
+    }
     auto valid = validate_resource_enforcement_receipt(
         receipt,
         limits,

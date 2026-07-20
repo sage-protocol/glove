@@ -1,6 +1,17 @@
 add_library(glove_supervisor STATIC
+    change_apply_authorization.cpp
+    change_apply_exchange.cpp
+    change_apply_gate.cpp
+    change_apply_journal.cpp
+    change_apply_receipt.cpp
+    change_apply_recovery.cpp
+    change_apply_trust_policy.cpp
+    change_manifest.cpp
     library_bundle.cpp
     path_alias.cpp
+    path_exposure.cpp
+    path_exposure_journal.cpp
+    path_exposure_policy.cpp
     session_plan.cpp
 )
 add_library(glove::supervisor ALIAS glove_supervisor)
@@ -8,6 +19,7 @@ add_library(glove::supervisor ALIAS glove_supervisor)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(glove_supervisor PRIVATE
         linux/ephemeral_copy.cpp
+        linux/persistent_quota_image.cpp
         linux/session_filesystem.cpp
     )
 endif()

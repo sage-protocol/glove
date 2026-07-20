@@ -110,13 +110,50 @@ journal, policy, and session-store paths:
   --audit-key /absolute/owner-only/audit.key \
   --journal /absolute/owner-only/receipts.journal \
   --session-policy /absolute/owner-only/session-policy.json \
-  --session-store /absolute/owner-only/sessions.journal
+  --session-store /absolute/owner-only/sessions.journal \
+  --path-exposure-policy /absolute/owner-only/path-exposure-policy.json \
+  --path-exposure-journal /absolute/owner-only/path-exposures.journal
 ```
 
 Linux managed-session configuration may also provide
 `--materialization-root` and `--library-bundle-root`. This enables the local
 session lifecycle, but does not by itself make Sage remote launch production
-ready. See [session-policy.md](session-policy.md).
+ready. Retained-write preparation additionally requires `mkfs.ext4`,
+`/dev/loop-control`, loop devices, and mount capability. See
+[session-policy.md](session-policy.md).
+
+### Sage-triggered user service
+
+Sage can start `gloved` through the current user's service manager before it
+negotiates capabilities. Substitute absolute paths in the platform template,
+install it under the standard per-user service directory, and load or enable
+it without starting it:
+
+- systemd: `packaging/systemd/sage-gloved.service.in`
+- launchd: `packaging/launchd/org.sage-protocol.gloved.plist.in`
+
+Then configure `saged`:
+
+```toml
+[daemon]
+fleet_execution_host_enabled = true
+glove_activation_mode = "user_service"
+glove_service_name = "org.sage-protocol.gloved" # macOS
+# glove_service_name = "sage-gloved.service"    # Linux
+glove_runtime_dir = "/absolute/owner-only/runtime"
+glove_session_policy_path = "/absolute/owner-only/session-policy.json"
+```
+
+Activation invokes only `/bin/launchctl` or `/usr/bin/systemctl` with a bounded
+service label. Neither a Glove binary path nor a service label is accepted from
+P2P. The service manager owns restart and shutdown policy; Sage waits for the
+socket and per-start credential, then performs its normal health and capability
+checks.
+
+This user-service profile retains the existing same-UID control contract and
+cannot activate host apply. A future system-service profile must use a distinct
+Glove identity, peer-credential policy, and group-readable control socket while
+keeping the apply-signing key unavailable to Sage.
 
 ## Troubleshooting
 

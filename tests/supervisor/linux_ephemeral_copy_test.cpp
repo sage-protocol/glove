@@ -1,7 +1,11 @@
 #include "glove/supervisor/linux_ephemeral_copy.hpp"
+#include "glove/supervisor/linux_session_filesystem.hpp"
+#include "glove/supervisor/path_exposure.hpp"
 
 #include <fcntl.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <array>
@@ -70,6 +74,15 @@ auto policy_for(
     };
 }
 
+auto retained_mode(std::uint64_t max_bytes) -> glove::supervisor::path_exposure_mode {
+    return {
+        .access = glove::supervisor::path_access::retained_write,
+        .materialization = glove::supervisor::path_materialization::copy,
+        .max_bytes = max_bytes,
+        .cleanup_policy = glove::supervisor::path_cleanup_policy::retain,
+    };
+}
+
 auto count_entries(const std::filesystem::path& path) -> std::size_t {
     return static_cast<std::size_t>(std::distance(
         std::filesystem::directory_iterator{path}, std::filesystem::directory_iterator{}
@@ -128,6 +141,7 @@ auto run() -> int {
     REQUIRE(page_size > 0);
     const auto page_bytes = static_cast<std::uint64_t>(page_size);
     const std::uint64_t quota_bytes = page_bytes * 16U;
+    const std::uint64_t retained_quota_bytes = std::uint64_t{32} * 1024U * 1024U;
     auto registry = glove::supervisor::path_alias_registry::build(
         {policy_for("workspace", source, "/workspace/project", quota_bytes)}
     );
@@ -215,6 +229,83 @@ auto run() -> int {
     REQUIRE(copied_file == "single");
     REQUIRE(file_materialized->cleanup().has_value());
 
+    auto exposures = glove::supervisor::path_exposure_registry::build({
+        {
+            .root_id = "projects",
+            .host_root = std::filesystem::canonical(tree.root()).string(),
+            .allowed_modes = {retained_mode(retained_quota_bytes)},
+            .max_ttl_secs = 3'600,
+            .allowed_runtime_template_ids = {"codex-safe"},
+        },
+    });
+    REQUIRE(exposures.has_value());
+    auto retained_exposure = exposures->create(
+        {
+            .request_id = "retained-create",
+            .exposure_id = "retained",
+            .root_id = "projects",
+            .host_path = std::filesystem::canonical(source).string(),
+            .display_label = "Retained test",
+            .allowed_modes = {retained_mode(retained_quota_bytes)},
+            .ttl_secs = 600,
+            .allowed_runtime_template_ids = {"codex-safe"},
+        },
+        1'000
+    );
+    REQUIRE(retained_exposure.has_value());
+    const glove::supervisor::path_exposure_grant retained_request{
+        .exposure_id = retained_exposure->exposure_id,
+        .generation = retained_exposure->generation,
+        .scope_digest = retained_exposure->scope_digest,
+        .access = glove::supervisor::path_access::retained_write,
+        .materialization = glove::supervisor::path_materialization::copy,
+        .max_bytes = retained_quota_bytes,
+        .ttl_secs = 300,
+        .cleanup_policy = glove::supervisor::path_cleanup_policy::retain,
+    };
+    auto retained_grant = exposures->resolve_grant(retained_request, "codex-safe", 2'000);
+    REQUIRE(retained_grant.has_value());
+    const auto child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        auto retained = glove::supervisor::linux_detail::ephemeral_copy_materialization::create(
+            materialization_root.string(), "session-recovery", *retained_grant
+        );
+        if (!retained) {
+            std::fprintf(stderr, "retained create failed: %s\n", retained.error().c_str());
+            ::_exit(10);
+        }
+        const int changed = ::openat(
+            retained->content_fd(), "alpha.txt", O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW
+        );
+        if (changed < 0 || ::write(changed, "changed", 7) != 7) {
+            ::_exit(11);
+        }
+        ::close(changed);
+        ::_exit(0);
+    }
+    int child_status = 0;
+    REQUIRE(::waitpid(child, &child_status, 0) == child);
+    if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        std::fprintf(stderr, "retained child status: %d\n", child_status);
+    }
+    REQUIRE(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    const auto retained_mount = materialization_root / "glove-mat-s16-session-recovery-a8-retained";
+    REQUIRE(::umount2(retained_mount.c_str(), 0) == 0);
+    REQUIRE(
+        glove::supervisor::linux_detail::linux_session_filesystem::cleanup_recovered(
+            materialization_root.string(),
+            "session-recovery",
+            retained_quota_bytes + quota_bytes,
+            {{.alias = "retained", .quota_bytes = retained_quota_bytes}}
+        ).has_value()
+    );
+    auto inspected = glove::supervisor::inspect_retained_change_stage(
+        std::filesystem::canonical(materialization_root).string(), "session-recovery", "retained"
+    );
+    REQUIRE(inspected.has_value());
+    REQUIRE(inspected->modified == 1);
+
     const auto large_file = source / "large.bin";
     {
         std::ofstream large{large_file, std::ios::binary};
@@ -233,7 +324,7 @@ auto run() -> int {
     );
     REQUIRE(!oversized.has_value());
     REQUIRE(oversized.error().find("quota exceeded") != std::string::npos);
-    REQUIRE(count_entries(materialization_root) == 0);
+    REQUIRE(count_entries(materialization_root) == 1);
     REQUIRE(std::filesystem::remove(large_file));
 
     const auto symlink = source / "escape";
@@ -243,7 +334,7 @@ auto run() -> int {
     );
     REQUIRE(!unsafe.has_value());
     REQUIRE(unsafe.error().find("symlink or special file") != std::string::npos);
-    REQUIRE(count_entries(materialization_root) == 0);
+    REQUIRE(count_entries(materialization_root) == 1);
     REQUIRE(std::filesystem::remove(symlink));
 
     const auto external_file = tree.root() / "outside.txt";
@@ -258,7 +349,7 @@ auto run() -> int {
     );
     REQUIRE(!hardlinked.has_value());
     REQUIRE(hardlinked.error().find("hardlinked file") != std::string::npos);
-    REQUIRE(count_entries(materialization_root) == 0);
+    REQUIRE(count_entries(materialization_root) == 1);
     REQUIRE(std::filesystem::remove(hardlink));
     REQUIRE(std::filesystem::remove(external_file));
 
@@ -279,7 +370,113 @@ auto run() -> int {
     );
     REQUIRE(!replaced.has_value());
     REQUIRE(replaced.error().find("identity changed") != std::string::npos);
-    REQUIRE(count_entries(materialization_root) == 0);
+    REQUIRE(count_entries(materialization_root) == 1);
+
+    const auto unrelated = materialization_root / "operator-owned-note";
+    {
+        std::ofstream note{unrelated};
+        note << "leave intact";
+    }
+    auto sweep_exposures = glove::supervisor::path_exposure_registry::build({
+        {
+            .root_id = "sweep-projects",
+            .host_root = std::filesystem::canonical(tree.root()).string(),
+            .allowed_modes = {retained_mode(retained_quota_bytes)},
+            .max_ttl_secs = 3'600,
+            .allowed_runtime_template_ids = {"codex-safe"},
+        },
+    });
+    REQUIRE(sweep_exposures.has_value());
+    auto sweep_exposure = sweep_exposures->create(
+        {
+            .request_id = "sweep-create",
+            .exposure_id = "sweep-retained",
+            .root_id = "sweep-projects",
+            .host_path = std::filesystem::canonical(moved_source).string(),
+            .display_label = "Sweep retained test",
+            .allowed_modes = {retained_mode(retained_quota_bytes)},
+            .ttl_secs = 600,
+            .allowed_runtime_template_ids = {"codex-safe"},
+        },
+        1'000
+    );
+    REQUIRE(sweep_exposure.has_value());
+    auto sweep_grant = sweep_exposures->resolve_grant(
+        {
+            .exposure_id = sweep_exposure->exposure_id,
+            .generation = sweep_exposure->generation,
+            .scope_digest = sweep_exposure->scope_digest,
+            .access = glove::supervisor::path_access::retained_write,
+            .materialization = glove::supervisor::path_materialization::copy,
+            .max_bytes = retained_quota_bytes,
+            .ttl_secs = 300,
+            .cleanup_policy = glove::supervisor::path_cleanup_policy::retain,
+        },
+        "codex-safe",
+        2'000
+    );
+    REQUIRE(sweep_grant.has_value());
+    auto protected_materialization =
+        glove::supervisor::linux_detail::ephemeral_copy_materialization::create(
+            materialization_root.string(), "session-protected", *sweep_grant
+        );
+    if (!protected_materialization) {
+        std::fprintf(
+            stderr,
+            "protected retained create failed: %s\n",
+            protected_materialization.error().c_str()
+        );
+    }
+    REQUIRE(protected_materialization.has_value());
+    auto protected_sweep =
+        glove::supervisor::linux_detail::linux_session_filesystem::sweep_orphaned(
+            materialization_root.string(), {"session-protected"}
+        );
+    REQUIRE(protected_sweep.has_value());
+    REQUIRE(protected_sweep->inspected == 0);
+    REQUIRE(read_at(protected_materialization->content_fd(), "alpha.txt") == "alpha");
+    REQUIRE(protected_materialization->cleanup().has_value());
+
+    const auto orphan = ::fork();
+    REQUIRE(orphan >= 0);
+    if (orphan == 0) {
+        auto retained = glove::supervisor::linux_detail::ephemeral_copy_materialization::create(
+            materialization_root.string(), "session-orphan", *sweep_grant
+        );
+        if (!retained) {
+            ::_exit(20);
+        }
+        const int changed = ::openat(
+            retained->content_fd(), "alpha.txt", O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW
+        );
+        if (changed < 0 || ::write(changed, "orphaned", 8) != 8) {
+            ::_exit(21);
+        }
+        ::close(changed);
+        ::_exit(0);
+    }
+    child_status = 0;
+    REQUIRE(::waitpid(orphan, &child_status, 0) == orphan);
+    REQUIRE(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    const auto orphan_mount =
+        materialization_root / "glove-mat-s14-session-orphan-a14-sweep-retained";
+    REQUIRE(::umount2(orphan_mount.c_str(), 0) == 0);
+    auto orphan_sweep = glove::supervisor::linux_detail::linux_session_filesystem::sweep_orphaned(
+        materialization_root.string(), {}
+    );
+    REQUIRE(orphan_sweep.has_value());
+    REQUIRE(orphan_sweep->inspected == 1);
+    REQUIRE(orphan_sweep->removed_without_stage == 0);
+    REQUIRE(orphan_sweep->recovered_retained_changes.size() == 1);
+    REQUIRE(orphan_sweep->recovered_retained_changes.front().session_id == "session-orphan");
+    auto orphan_stage = glove::supervisor::inspect_retained_change_stage(
+        std::filesystem::canonical(materialization_root).string(),
+        "session-orphan",
+        "sweep-retained"
+    );
+    REQUIRE(orphan_stage.has_value());
+    REQUIRE(orphan_stage->modified == 1);
+    REQUIRE(std::filesystem::exists(unrelated));
     return 0;
 }
 

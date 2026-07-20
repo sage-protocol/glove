@@ -1,6 +1,7 @@
 #include "glove/control/receipt_audit_protocol.hpp"
 
 #include "glove/container/digest.hpp"
+#include "glove/supervisor/change_manifest.hpp"
 
 #include "receipt_audit_wire.hpp"
 
@@ -154,6 +155,93 @@ struct session_record_result {
     std::optional<std::string> profile_digest;
 };
 
+struct path_exposure_mode {
+    std::string access;
+    std::string materialization;
+    std::uint64_t max_bytes = 0;
+    std::string cleanup_policy;
+};
+
+struct path_exposure_projection {
+    std::uint8_t schema_version = 1;
+    std::string exposure_id;
+    std::uint64_t generation = 0;
+    std::string scope_digest;
+    std::string display_label;
+    std::vector<path_exposure_mode> allowed_modes;
+    std::uint64_t expires_at_ms = 0;
+    std::vector<std::string> allowed_runtime_template_ids;
+    std::string state;
+};
+
+struct create_path_exposure_request {
+    std::string exposure_id;
+    std::string root_id;
+    std::string host_path;
+    std::string display_label;
+    std::vector<path_exposure_mode> allowed_modes;
+    std::uint64_t ttl_secs = 0;
+    std::vector<std::string> allowed_runtime_template_ids;
+};
+
+struct revoke_path_exposure_request {
+    std::string exposure_id;
+    std::uint64_t generation = 0;
+};
+
+struct path_exposure_result {
+    std::uint8_t schema_version = 1;
+    path_exposure_projection exposure;
+};
+
+struct path_exposure_list_result {
+    std::uint8_t schema_version = 1;
+    std::vector<path_exposure_projection> exposures;
+};
+
+struct retained_change_inspect_request {
+    std::string session_id;
+    std::string exposure_id;
+    std::uint64_t offset = 0;
+    std::uint32_t limit = 0;
+};
+
+struct retained_change_entry {
+    std::string kind;
+    std::string path;
+    std::string previous_path;
+    std::string before_digest;
+    std::string after_digest;
+    std::uint64_t before_bytes = 0;
+    std::uint64_t after_bytes = 0;
+    std::uint32_t before_mode = 0;
+    std::uint32_t after_mode = 0;
+    bool directory = false;
+};
+
+struct retained_change_inspect_result {
+    std::uint8_t schema_version = 1;
+    std::string session_id;
+    std::string exposure_id;
+    std::uint64_t generation = 0;
+    std::string scope_digest;
+    std::string source_identity_digest;
+    std::uint64_t max_bytes = 0;
+    bool directory = false;
+    std::string baseline_tree_digest;
+    std::string staged_tree_digest;
+    std::string manifest_digest;
+    std::uint64_t created = 0;
+    std::uint64_t modified = 0;
+    std::uint64_t renamed = 0;
+    std::uint64_t removed = 0;
+    std::uint64_t before_bytes = 0;
+    std::uint64_t after_bytes = 0;
+    std::uint64_t total_changes = 0;
+    std::optional<std::uint64_t> next_offset;
+    std::vector<retained_change_entry> changes;
+};
+
 struct receipt_audit_capabilities {
     std::uint8_t envelope_schema_version = 1;
     std::string algorithm = "hmac_sha256";
@@ -197,6 +285,11 @@ struct supervisor_capabilities {
     // Zero until Glove creates a private agent home and expands exact Sage
     // bundles into the selected harness's native discovery locations.
     std::uint8_t agent_runtime_adapter_schema_version = 0;
+    std::uint8_t path_exposure_admin_schema_version = 0;
+    std::uint8_t path_exposure_catalog_schema_version = 0;
+    std::uint8_t retained_write_schema_version = 0;
+    std::uint8_t change_manifest_schema_version = 0;
+    std::uint8_t change_apply_authorization_schema_version = 0;
     std::vector<backend_capabilities> backends;
 };
 
@@ -218,12 +311,20 @@ using wire::acknowledgement_request;
 using wire::acknowledgement_result;
 using wire::attach_request;
 using wire::backend_capabilities;
+using wire::create_path_exposure_request;
 using wire::create_session_request;
 using wire::detach_request;
 using wire::page_request;
 using wire::page_result;
+using wire::path_exposure_list_result;
+using wire::path_exposure_projection;
+using wire::path_exposure_result;
 using wire::receipt_audit_capabilities;
 using wire::resize_request;
+using wire::retained_change_entry;
+using wire::retained_change_inspect_request;
+using wire::retained_change_inspect_result;
+using wire::revoke_path_exposure_request;
 using wire::rpc_error;
 using wire::rpc_params;
 using wire::rpc_request;
@@ -263,6 +364,120 @@ auto valid_identifier(std::string_view value, std::size_t max_bytes = max_identi
                       (byte >= '0' && byte <= '9') || byte == '-' || byte == '_' || byte == ':' ||
                       byte == '.';
            });
+}
+
+auto parse_path_access(std::string_view value)
+    -> std::expected<supervisor::path_access, std::string> {
+    if (value == "read") {
+        return supervisor::path_access::read;
+    }
+    if (value == "ephemeral_write") {
+        return supervisor::path_access::ephemeral_write;
+    }
+    if (value == "retained_write") {
+        return supervisor::path_access::retained_write;
+    }
+    return std::unexpected(std::string{"invalid path exposure access"});
+}
+
+auto parse_path_materialization(std::string_view value)
+    -> std::expected<supervisor::path_materialization, std::string> {
+    if (value == "bind") {
+        return supervisor::path_materialization::bind;
+    }
+    if (value == "git_worktree") {
+        return supervisor::path_materialization::git_worktree;
+    }
+    if (value == "copy") {
+        return supervisor::path_materialization::copy;
+    }
+    return std::unexpected(std::string{"invalid path exposure materialization"});
+}
+
+auto parse_path_cleanup(std::string_view value)
+    -> std::expected<supervisor::path_cleanup_policy, std::string> {
+    if (value == "retain") {
+        return supervisor::path_cleanup_policy::retain;
+    }
+    if (value == "remove") {
+        return supervisor::path_cleanup_policy::remove;
+    }
+    return std::unexpected(std::string{"invalid path exposure cleanup policy"});
+}
+
+auto path_access_name(supervisor::path_access value) -> std::string_view {
+    switch (value) {
+    case supervisor::path_access::read:
+        return "read";
+    case supervisor::path_access::ephemeral_write:
+        return "ephemeral_write";
+    case supervisor::path_access::retained_write:
+        return "retained_write";
+    case supervisor::path_access::direct_write:
+        return "direct_write";
+    }
+    return {};
+}
+
+auto path_materialization_name(supervisor::path_materialization value) -> std::string_view {
+    switch (value) {
+    case supervisor::path_materialization::bind:
+        return "bind";
+    case supervisor::path_materialization::snapshot:
+        return "snapshot";
+    case supervisor::path_materialization::git_worktree:
+        return "git_worktree";
+    case supervisor::path_materialization::copy:
+        return "copy";
+    }
+    return {};
+}
+
+auto path_cleanup_name(supervisor::path_cleanup_policy value) -> std::string_view {
+    switch (value) {
+    case supervisor::path_cleanup_policy::retain:
+        return "retain";
+    case supervisor::path_cleanup_policy::remove:
+        return "remove";
+    }
+    return {};
+}
+
+auto path_exposure_state_name(supervisor::path_exposure_state value) -> std::string_view {
+    switch (value) {
+    case supervisor::path_exposure_state::active:
+        return "active";
+    case supervisor::path_exposure_state::revoked:
+        return "revoked";
+    case supervisor::path_exposure_state::expired:
+        return "expired";
+    }
+    return {};
+}
+
+auto project_path_exposure(const supervisor::path_exposure_projection& exposure)
+    -> path_exposure_projection {
+    std::vector<wire::path_exposure_mode> modes;
+    modes.reserve(exposure.allowed_modes.size());
+    for (const auto& mode : exposure.allowed_modes) {
+        modes.push_back({
+            .access = std::string{path_access_name(mode.access)},
+            .materialization = std::string{path_materialization_name(mode.materialization)},
+            .max_bytes = mode.max_bytes,
+            .cleanup_policy = std::string{path_cleanup_name(mode.cleanup_policy)},
+        });
+    }
+    return {
+        .schema_version = exposure.schema_version,
+        .exposure_id = exposure.exposure_id,
+        .generation = exposure.generation,
+        .scope_digest = exposure.scope_digest,
+        .display_label = exposure.display_label,
+        .allowed_modes = std::move(modes),
+        .expires_at_ms = exposure.expires_at_ms,
+        .allowed_runtime_template_ids = exposure.allowed_runtime_template_ids,
+        .state = std::string{path_exposure_state_name(exposure.state)},
+    };
 }
 
 auto constant_time_equal(std::string_view left, std::string_view right) noexcept -> bool {
@@ -366,6 +581,8 @@ struct receipt_audit_protocol::implementation {
     std::shared_ptr<const supervisor::session_plan_validator> plan_validator;
     std::shared_ptr<session_registry> sessions;
     std::shared_ptr<linux_detail::linux_session_runtime> session_runtime;
+    std::shared_ptr<supervisor::path_exposure_registry> path_exposures;
+    std::string materialization_root;
     std::mutex producer_mutex;
     std::mutex idempotency_mutex;
     std::unordered_map<std::string, idempotency_record> idempotency_records;
@@ -436,6 +653,10 @@ auto handle_capabilities(
             .receipt_schema_version = capabilities.receipt_schema_version,
         };
     }
+    const auto retained_write_schema_version =
+        state.session_runtime && state.path_exposures ? std::uint8_t{1} : std::uint8_t{0};
+#else
+    constexpr std::uint8_t retained_write_schema_version = 0;
 #endif
     auto result = encode_json(
         wire::supervisor_capabilities{
@@ -461,6 +682,13 @@ auto handle_capabilities(
                     .cleanup_session = state.session_runtime != nullptr,
                 },
             .agent_runtime_adapter_schema_version = 0,
+            .path_exposure_admin_schema_version =
+                state.path_exposures ? std::uint8_t{1} : std::uint8_t{0},
+            .path_exposure_catalog_schema_version =
+                state.path_exposures ? std::uint8_t{1} : std::uint8_t{0},
+            .retained_write_schema_version = retained_write_schema_version,
+            .change_manifest_schema_version = retained_write_schema_version,
+            .change_apply_authorization_schema_version = 0,
             .backends = {
                 backend_capabilities{
                     .backend = "linux_production",
@@ -1102,6 +1330,240 @@ auto handle_cleanup_session(
 #endif
 }
 
+auto handle_create_path_exposure(
+    receipt_audit_protocol::implementation& state,
+    std::string_view request_id,
+    const rpc_params& params,
+    std::uint64_t now_ms
+) -> std::expected<std::string, std::string> {
+    if (!state.path_exposures) {
+        return error_response(request_id, "method_not_found", "control method is unavailable");
+    }
+    const auto idempotency_key = params.idempotency_key.value_or(std::string{});
+    if (!valid_identifier(idempotency_key)) {
+        return error_response(
+            request_id, "invalid_request", "path exposure creation requires idempotency"
+        );
+    }
+    auto payload = decode_strict<create_path_exposure_request>(params.payload.str);
+    if (!payload) {
+        return error_response(request_id, "invalid_request", "invalid path exposure request");
+    }
+    std::vector<supervisor::path_exposure_mode> modes;
+    modes.reserve(payload->allowed_modes.size());
+    for (const auto& mode : payload->allowed_modes) {
+        auto access = parse_path_access(mode.access);
+        auto materialization = parse_path_materialization(mode.materialization);
+        auto cleanup = parse_path_cleanup(mode.cleanup_policy);
+        if (!access || !materialization || !cleanup) {
+            return error_response(request_id, "invalid_request", "invalid path exposure mode");
+        }
+        modes.push_back({
+            .access = *access,
+            .materialization = *materialization,
+            .max_bytes = mode.max_bytes,
+            .cleanup_policy = *cleanup,
+        });
+    }
+    auto created = state.path_exposures->create(
+        supervisor::path_exposure_create_request{
+            .request_id = idempotency_key,
+            .exposure_id = payload->exposure_id,
+            .root_id = payload->root_id,
+            .host_path = payload->host_path,
+            .display_label = payload->display_label,
+            .allowed_modes = std::move(modes),
+            .ttl_secs = payload->ttl_secs,
+            .allowed_runtime_template_ids = payload->allowed_runtime_template_ids,
+        },
+        now_ms
+    );
+    if (!created) {
+        return error_response(
+            request_id, "path_exposure_rejected", "path exposure creation was rejected"
+        );
+    }
+    const auto inventory = state.path_exposures->list(now_ms);
+    const auto projection = std::ranges::find_if(inventory, [&](const auto& exposure) {
+        return exposure.exposure_id == created->exposure_id &&
+               exposure.generation == created->generation;
+    });
+    if (projection == inventory.end()) {
+        return error_response(
+            request_id, "path_exposure_unavailable", "created path exposure is unavailable"
+        );
+    }
+    auto result = encode_json(
+        path_exposure_result{
+            .exposure = project_path_exposure(*projection),
+        }
+    );
+    if (!result) {
+        return std::unexpected(result.error());
+    }
+    return success_response(request_id, std::move(*result));
+}
+
+auto handle_list_path_exposures(
+    const receipt_audit_protocol::implementation& state,
+    std::string_view request_id,
+    const rpc_params& params,
+    std::uint64_t now_ms
+) -> std::expected<std::string, std::string> {
+    if (!state.path_exposures) {
+        return error_response(request_id, "method_not_found", "control method is unavailable");
+    }
+    if (params.idempotency_key.has_value() || params.payload.str != "null") {
+        return error_response(
+            request_id, "invalid_request", "path exposure listing requires a null read-only payload"
+        );
+    }
+    std::vector<path_exposure_projection> projections;
+    for (const auto& exposure : state.path_exposures->list(now_ms)) {
+        projections.push_back(project_path_exposure(exposure));
+    }
+    auto result = encode_json(
+        path_exposure_list_result{
+            .exposures = std::move(projections),
+        }
+    );
+    if (!result) {
+        return std::unexpected(result.error());
+    }
+    return success_response(request_id, std::move(*result));
+}
+
+auto handle_revoke_path_exposure(
+    receipt_audit_protocol::implementation& state,
+    std::string_view request_id,
+    const rpc_params& params,
+    std::uint64_t now_ms
+) -> std::expected<std::string, std::string> {
+    if (!state.path_exposures) {
+        return error_response(request_id, "method_not_found", "control method is unavailable");
+    }
+    const auto idempotency_key = params.idempotency_key.value_or(std::string{});
+    auto payload = decode_strict<revoke_path_exposure_request>(params.payload.str);
+    if (!valid_identifier(idempotency_key) || !payload) {
+        return error_response(request_id, "invalid_request", "invalid path exposure revocation");
+    }
+    auto revoked = state.path_exposures->revoke(
+        idempotency_key, payload->exposure_id, payload->generation, now_ms
+    );
+    if (!revoked) {
+        return error_response(
+            request_id, "path_exposure_rejected", "path exposure revocation was rejected"
+        );
+    }
+    const auto inventory = state.path_exposures->list(now_ms);
+    const auto projection = std::ranges::find_if(inventory, [&](const auto& exposure) {
+        return exposure.exposure_id == payload->exposure_id &&
+               exposure.generation == payload->generation;
+    });
+    if (projection == inventory.end()) {
+        return error_response(
+            request_id, "path_exposure_unavailable", "revoked path exposure is unavailable"
+        );
+    }
+    auto result = encode_json(
+        path_exposure_result{
+            .exposure = project_path_exposure(*projection),
+        }
+    );
+    if (!result) {
+        return std::unexpected(result.error());
+    }
+    return success_response(request_id, std::move(*result));
+}
+
+auto retained_change_kind_name(supervisor::path_change_kind kind) -> std::string_view {
+    switch (kind) {
+    case supervisor::path_change_kind::create:
+        return "create";
+    case supervisor::path_change_kind::modify:
+        return "modify";
+    case supervisor::path_change_kind::rename:
+        return "rename";
+    case supervisor::path_change_kind::remove:
+        return "remove";
+    }
+    return "";
+}
+
+auto handle_inspect_retained_changes(
+    const receipt_audit_protocol::implementation& state,
+    std::string_view request_id,
+    const rpc_params& params
+) -> std::expected<std::string, std::string> {
+    if (state.materialization_root.empty()) {
+        return error_response(request_id, "method_not_found", "control method is unavailable");
+    }
+    if (params.idempotency_key.has_value()) {
+        return error_response(request_id, "invalid_request", "inspection is read-only");
+    }
+    auto payload = decode_strict<retained_change_inspect_request>(params.payload.str);
+    if (!payload || !valid_identifier(payload->session_id) ||
+        !valid_identifier(payload->exposure_id) || payload->limit == 0 || payload->limit > 256U) {
+        return error_response(request_id, "invalid_request", "invalid retained change request");
+    }
+    auto manifest = supervisor::inspect_retained_change_stage(
+        state.materialization_root, payload->session_id, payload->exposure_id
+    );
+    if (!manifest || payload->offset > manifest->changes.size()) {
+        return error_response(
+            request_id, "retained_changes_unavailable", "retained changes are unavailable"
+        );
+    }
+    const auto begin = static_cast<std::size_t>(payload->offset);
+    const auto end =
+        std::min(manifest->changes.size(), begin + static_cast<std::size_t>(payload->limit));
+    std::vector<retained_change_entry> changes;
+    changes.reserve(end - begin);
+    for (auto index = begin; index < end; ++index) {
+        const auto& change = manifest->changes[index];
+        changes.push_back({
+            .kind = std::string{retained_change_kind_name(change.kind)},
+            .path = change.path,
+            .previous_path = change.previous_path,
+            .before_digest = change.before_digest,
+            .after_digest = change.after_digest,
+            .before_bytes = change.before_bytes,
+            .after_bytes = change.after_bytes,
+            .before_mode = change.before_mode,
+            .after_mode = change.after_mode,
+            .directory = change.directory,
+        });
+    }
+    auto result = encode_json(
+        retained_change_inspect_result{
+            .session_id = manifest->session_id,
+            .exposure_id = manifest->exposure_id,
+            .generation = manifest->generation,
+            .scope_digest = manifest->scope_digest,
+            .source_identity_digest = manifest->source_identity_digest,
+            .max_bytes = manifest->max_bytes,
+            .directory = manifest->directory,
+            .baseline_tree_digest = manifest->baseline_tree_digest,
+            .staged_tree_digest = manifest->staged_tree_digest,
+            .manifest_digest = manifest->manifest_digest,
+            .created = manifest->created,
+            .modified = manifest->modified,
+            .renamed = manifest->renamed,
+            .removed = manifest->removed,
+            .before_bytes = manifest->before_bytes,
+            .after_bytes = manifest->after_bytes,
+            .total_changes = manifest->changes.size(),
+            .next_offset =
+                end < manifest->changes.size() ? std::optional<std::uint64_t>{end} : std::nullopt,
+            .changes = std::move(changes),
+        }
+    );
+    if (!result) {
+        return std::unexpected(result.error());
+    }
+    return success_response(request_id, std::move(*result));
+}
+
 auto handle_validate_plan(
     const receipt_audit_protocol::implementation& state,
     std::string_view request_id,
@@ -1266,7 +1728,9 @@ auto receipt_audit_protocol::create(
     std::shared_ptr<container::receipt_audit_producer> producer,
     std::shared_ptr<const supervisor::session_plan_validator> plan_validator,
     std::shared_ptr<session_registry> sessions,
-    std::shared_ptr<linux_detail::linux_session_runtime> session_runtime
+    std::shared_ptr<linux_detail::linux_session_runtime> session_runtime,
+    std::shared_ptr<supervisor::path_exposure_registry> path_exposures,
+    std::string materialization_root
 ) -> std::expected<std::unique_ptr<receipt_audit_protocol>, std::string> {
 #if !defined(__linux__)
     if (session_runtime) {
@@ -1274,7 +1738,7 @@ auto receipt_audit_protocol::create(
     }
 #endif
     if (!valid_hex_secret(bootstrap_secret_hex) || !producer || (sessions && !plan_validator) ||
-        (session_runtime && (!sessions || !plan_validator))) {
+        (session_runtime && (!sessions || !plan_validator || materialization_root.empty()))) {
         return std::unexpected(std::string{"receipt audit protocol configuration is invalid"});
     }
     auto state = std::make_unique<implementation>();
@@ -1284,6 +1748,8 @@ auto receipt_audit_protocol::create(
     state->plan_validator = std::move(plan_validator);
     state->sessions = std::move(sessions);
     state->session_runtime = std::move(session_runtime);
+    state->path_exposures = std::move(path_exposures);
+    state->materialization_root = std::move(materialization_root);
     return std::make_unique<receipt_audit_protocol>(construction_token{}, std::move(state));
 }
 
@@ -1292,7 +1758,9 @@ auto receipt_audit_protocol::create(
     container::receipt_audit_producer_config producer_config,
     std::shared_ptr<const supervisor::session_plan_validator> plan_validator,
     std::shared_ptr<session_registry> sessions,
-    std::shared_ptr<linux_detail::linux_session_runtime> session_runtime
+    std::shared_ptr<linux_detail::linux_session_runtime> session_runtime,
+    std::shared_ptr<supervisor::path_exposure_registry> path_exposures,
+    std::string materialization_root
 ) -> std::expected<std::unique_ptr<receipt_audit_protocol>, std::string> {
 #if !defined(__linux__)
     if (session_runtime) {
@@ -1301,7 +1769,7 @@ auto receipt_audit_protocol::create(
 #endif
     if (!valid_hex_secret(bootstrap_secret_hex) || producer_config.key_path.empty() ||
         producer_config.journal_path.empty() || (sessions && !plan_validator) ||
-        (session_runtime && (!sessions || !plan_validator))) {
+        (session_runtime && (!sessions || !plan_validator || materialization_root.empty()))) {
         return std::unexpected(std::string{"receipt audit protocol configuration is invalid"});
     }
     auto audit_key_id = container::receipt_audit_producer::audit_key_id(producer_config);
@@ -1315,6 +1783,8 @@ auto receipt_audit_protocol::create(
     state->plan_validator = std::move(plan_validator);
     state->sessions = std::move(sessions);
     state->session_runtime = std::move(session_runtime);
+    state->path_exposures = std::move(path_exposures);
+    state->materialization_root = std::move(materialization_root);
     return std::make_unique<receipt_audit_protocol>(construction_token{}, std::move(state));
 }
 
@@ -1353,6 +1823,22 @@ auto receipt_audit_protocol::handle_frame(std::string_view frame, std::uint64_t 
 
     if (request->method == "validate_plan") {
         return handle_validate_plan(*state_, request->id, *params, now_ms);
+    }
+
+    if (request->method == "create_path_exposure") {
+        return handle_create_path_exposure(*state_, request->id, *params, now_ms);
+    }
+
+    if (request->method == "list_path_exposures") {
+        return handle_list_path_exposures(*state_, request->id, *params, now_ms);
+    }
+
+    if (request->method == "revoke_path_exposure") {
+        return handle_revoke_path_exposure(*state_, request->id, *params, now_ms);
+    }
+
+    if (request->method == "inspect_retained_changes") {
+        return handle_inspect_retained_changes(*state_, request->id, *params);
     }
 
     if (request->method == "create_session") {

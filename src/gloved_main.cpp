@@ -1,6 +1,7 @@
 #include "glove/control/receipt_audit_unix_server.hpp"
 #include "glove/control/session_registry.hpp"
 #include "glove/supervisor/library_bundle.hpp"
+#include "glove/supervisor/path_exposure_journal.hpp"
 #include "glove/supervisor/session_plan.hpp"
 
 #if defined(__linux__)
@@ -95,13 +96,13 @@ struct options {
     std::optional<std::filesystem::path> session_store;
     std::optional<std::filesystem::path> materialization_root;
     std::optional<std::filesystem::path> library_bundle_root;
+    std::optional<std::filesystem::path> path_exposure_policy;
+    std::optional<std::filesystem::path> path_exposure_journal;
 };
 
 auto parse_options(int argc, char** argv) -> std::expected<options, std::string> {
-    if (argc != 7 && argc != 9 && argc != 11 && argc != 13 && argc != 15) {
-        return std::unexpected(
-            std::string{"expected three required and up to four optional paths"}
-        );
+    if (argc < 7 || argc > 19 || argc % 2 == 0) {
+        return std::unexpected(std::string{"expected three required and up to six optional paths"});
     }
 
     options parsed;
@@ -112,6 +113,8 @@ auto parse_options(int argc, char** argv) -> std::expected<options, std::string>
     std::optional<std::filesystem::path> session_store;
     std::optional<std::filesystem::path> materialization_root;
     std::optional<std::filesystem::path> library_bundle_root;
+    std::optional<std::filesystem::path> path_exposure_policy;
+    std::optional<std::filesystem::path> path_exposure_journal;
     for (int index = 1; index < argc; index += 2) {
         const std::string_view option{argv[index]};
         const std::filesystem::path value{argv[index + 1]};
@@ -129,6 +132,10 @@ auto parse_options(int argc, char** argv) -> std::expected<options, std::string>
             materialization_root = value;
         } else if (option == "--library-bundle-root" && !library_bundle_root) {
             library_bundle_root = value;
+        } else if (option == "--path-exposure-policy" && !path_exposure_policy) {
+            path_exposure_policy = value;
+        } else if (option == "--path-exposure-journal" && !path_exposure_journal) {
+            path_exposure_journal = value;
         } else {
             return std::unexpected(std::string{"unknown or duplicate gloved option"});
         }
@@ -138,8 +145,15 @@ auto parse_options(int argc, char** argv) -> std::expected<options, std::string>
         (session_policy && !session_policy->is_absolute()) ||
         (session_store && !session_store->is_absolute()) ||
         (materialization_root && !materialization_root->is_absolute()) ||
-        (library_bundle_root && !library_bundle_root->is_absolute())) {
+        (library_bundle_root && !library_bundle_root->is_absolute()) ||
+        (path_exposure_policy && !path_exposure_policy->is_absolute()) ||
+        (path_exposure_journal && !path_exposure_journal->is_absolute())) {
         return std::unexpected(std::string{"gloved paths must be absolute"});
+    }
+    if (path_exposure_policy.has_value() != path_exposure_journal.has_value()) {
+        return std::unexpected(
+            std::string{"path exposure policy and journal must be configured together"}
+        );
     }
     if (session_store) {
         if (!session_policy) {
@@ -175,6 +189,24 @@ auto parse_options(int argc, char** argv) -> std::expected<options, std::string>
             return std::unexpected(std::string{"library bundle root path must be dedicated"});
         }
     }
+    if (path_exposure_policy &&
+        (*path_exposure_policy == *runtime_directory || *path_exposure_policy == *audit_key ||
+         *path_exposure_policy == *journal || *path_exposure_policy == *path_exposure_journal ||
+         (session_policy && *path_exposure_policy == *session_policy) ||
+         (session_store && *path_exposure_policy == *session_store) ||
+         (materialization_root && *path_exposure_policy == *materialization_root) ||
+         (library_bundle_root && *path_exposure_policy == *library_bundle_root))) {
+        return std::unexpected(std::string{"path exposure policy path must be dedicated"});
+    }
+    if (path_exposure_journal &&
+        (*path_exposure_journal == *runtime_directory || *path_exposure_journal == *audit_key ||
+         *path_exposure_journal == *journal ||
+         (session_policy && *path_exposure_journal == *session_policy) ||
+         (session_store && *path_exposure_journal == *session_store) ||
+         (materialization_root && *path_exposure_journal == *materialization_root) ||
+         (library_bundle_root && *path_exposure_journal == *library_bundle_root))) {
+        return std::unexpected(std::string{"path exposure journal path must be dedicated"});
+    }
     parsed.runtime_directory = std::move(*runtime_directory);
     parsed.audit_key = std::move(*audit_key);
     parsed.journal = std::move(*journal);
@@ -182,6 +214,8 @@ auto parse_options(int argc, char** argv) -> std::expected<options, std::string>
     parsed.session_store = std::move(session_store);
     parsed.materialization_root = std::move(materialization_root);
     parsed.library_bundle_root = std::move(library_bundle_root);
+    parsed.path_exposure_policy = std::move(path_exposure_policy);
+    parsed.path_exposure_journal = std::move(path_exposure_journal);
     return parsed;
 }
 
@@ -421,9 +455,24 @@ auto install_shutdown_handlers() -> std::expected<void, std::string> {
 }
 
 auto run(const options& configured) -> std::expected<void, std::string> {
+    std::shared_ptr<glove::supervisor::path_exposure_registry> path_exposures;
+    if (configured.path_exposure_policy) {
+        auto loaded = glove::supervisor::path_exposure_registry::load(
+            *configured.path_exposure_policy,
+            *configured.path_exposure_journal,
+            glove::supervisor::default_path_exposure_journal_bytes
+        );
+        if (!loaded) {
+            return std::unexpected(std::string{"load path exposure policy: "} + loaded.error());
+        }
+        path_exposures =
+            std::make_shared<glove::supervisor::path_exposure_registry>(std::move(*loaded));
+    }
     std::shared_ptr<const glove::supervisor::session_plan_validator> plan_validator;
     if (configured.session_policy) {
-        auto loaded = glove::supervisor::session_plan_validator::load(*configured.session_policy);
+        auto loaded = glove::supervisor::session_plan_validator::load(
+            *configured.session_policy, path_exposures
+        );
         if (!loaded) {
             return std::unexpected(std::string{"load session policy: "} + loaded.error());
         }
@@ -510,6 +559,10 @@ auto run(const options& configured) -> std::expected<void, std::string> {
         .plan_validator = std::move(plan_validator),
         .sessions = std::move(sessions),
         .session_runtime = std::move(session_runtime),
+        .path_exposures = std::move(path_exposures),
+        .materialization_root = configured.materialization_root
+                                    ? configured.materialization_root->string()
+                                    : std::string{},
         .io_timeout_ms = connection_timeout_ms,
     };
     auto server = glove::control::receipt_audit_unix_server::create(std::move(server_config));
@@ -526,13 +579,14 @@ auto run(const options& configured) -> std::expected<void, std::string> {
 }
 
 void print_usage() {
-    std::cerr
-        << "usage: gloved --runtime-dir <absolute-dir> --audit-key <absolute-file> "
-           "--journal <absolute-file> [--session-policy <owner-only-json> "
-           "[--session-store <owner-only-journal> "
-           "[--materialization-root <owner-only-directory>] "
-           "[--library-bundle-root <owner-only-directory>]]]\n"
-           "managed sessions require the Linux runtime; direct-write launch remains disabled\n";
+    std::cerr << "usage: gloved --runtime-dir <absolute-dir> --audit-key <absolute-file> "
+                 "--journal <absolute-file> [--session-policy <owner-only-json> "
+                 "[--session-store <owner-only-journal> "
+                 "[--materialization-root <owner-only-directory>] "
+                 "[--library-bundle-root <owner-only-directory>]]]\n"
+                 "[--path-exposure-policy <owner-only-json> "
+                 "--path-exposure-journal <owner-only-journal>]\n"
+                 "managed sessions require Linux; legacy direct-write launch remains disabled\n";
 }
 
 } // namespace

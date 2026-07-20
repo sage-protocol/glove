@@ -223,6 +223,14 @@ auto validate_access_policy(const path_access_policy& policy) -> std::expected<v
             );
         }
         break;
+    case path_access::retained_write:
+        if (policy.materialization == path_materialization::bind || policy.max_bytes == 0 ||
+            policy.cleanup_policy != path_cleanup_policy::retain) {
+            return std::unexpected(
+                std::string{"retained write requires bounded retained materialization"}
+            );
+        }
+        break;
     case path_access::direct_write:
         if (policy.materialization != path_materialization::bind || policy.max_bytes != 0 ||
             policy.create_policy != path_create_policy::never ||
@@ -251,13 +259,14 @@ auto validate_request_bounds(
     if (request.ttl_secs == 0 || request.ttl_secs > policy.max_ttl_secs) {
         return std::unexpected(std::string{"path grant TTL exceeds host policy"});
     }
-    if (request.access == path_access::ephemeral_write) {
+    if (request.access == path_access::ephemeral_write ||
+        request.access == path_access::retained_write) {
         if (request.max_bytes == 0 || request.max_bytes > mode.max_bytes) {
             return std::unexpected(std::string{"path grant quota exceeds host policy"});
         }
     } else if (request.max_bytes != 0) {
         return std::unexpected(
-            std::string{"non-ephemeral path grant may not request a write quota"}
+            std::string{"read or legacy direct-write grants may not request a write quota"}
         );
     }
     return {};
@@ -272,7 +281,10 @@ resolved_path_grant::resolved_path_grant(
     std::string target_path,
     const path_access_policy& policy,
     const path_grant_request& request,
-    path_identity identity
+    path_identity identity,
+    std::uint64_t exposure_generation,
+    std::string exposure_scope_digest,
+    std::string source_identity_digest
 )
     : descriptor_fd_{descriptor_fd},
       alias_{std::move(alias)},
@@ -284,7 +296,10 @@ resolved_path_grant::resolved_path_grant(
       cleanup_policy_{policy.cleanup_policy},
       ttl_secs_{request.ttl_secs},
       max_bytes_{request.max_bytes},
-      identity_{identity} {}
+      identity_{identity},
+      exposure_generation_{exposure_generation},
+      exposure_scope_digest_{std::move(exposure_scope_digest)},
+      source_identity_digest_{std::move(source_identity_digest)} {}
 
 resolved_path_grant::resolved_path_grant(resolved_path_grant&& other) noexcept
     : descriptor_fd_{std::exchange(other.descriptor_fd_, -1)},
@@ -297,7 +312,10 @@ resolved_path_grant::resolved_path_grant(resolved_path_grant&& other) noexcept
       cleanup_policy_{other.cleanup_policy_},
       ttl_secs_{other.ttl_secs_},
       max_bytes_{other.max_bytes_},
-      identity_{other.identity_} {}
+      identity_{other.identity_},
+      exposure_generation_{other.exposure_generation_},
+      exposure_scope_digest_{std::move(other.exposure_scope_digest_)},
+      source_identity_digest_{std::move(other.source_identity_digest_)} {}
 
 auto resolved_path_grant::operator=(resolved_path_grant&& other) noexcept -> resolved_path_grant& {
     if (this != &other) {
@@ -313,6 +331,9 @@ auto resolved_path_grant::operator=(resolved_path_grant&& other) noexcept -> res
         ttl_secs_ = other.ttl_secs_;
         max_bytes_ = other.max_bytes_;
         identity_ = other.identity_;
+        exposure_generation_ = other.exposure_generation_;
+        exposure_scope_digest_ = std::move(other.exposure_scope_digest_);
+        source_identity_digest_ = std::move(other.source_identity_digest_);
     }
     return *this;
 }

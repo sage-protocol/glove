@@ -80,6 +80,7 @@ auto run() -> int {
             .started_at_ms = 1'000,
             .finished_at_ms = 1'750,
             .library_projections = {},
+            .retained_changes = {},
         };
         REQUIRE(
             glove::container::validate_resource_enforcement_receipt(

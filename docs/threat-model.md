@@ -19,7 +19,7 @@ host security boundary.
 | Glove control, policy, and sandbox code | Trusted |
 | Local policy, launch templates, and approval records | Trusted operator input |
 | MCP upstream servers | Trusted host processes; not sandboxed by Glove |
-| Sage controller | Authenticated peer, but not authority for arbitrary local paths or direct writes |
+| Sage controller | Authenticated peer, but not authority for raw paths, exposure administration, or host mutation |
 | Operating-system kernel and platform sandbox | Trusted and patched |
 | Other processes under the same host user | Outside the strong integrity boundary |
 
@@ -51,7 +51,7 @@ the operation rather than silently reducing enforcement.
 | Linux kernel escape | A kernel vulnerability can cross namespace or seccomp boundaries. | Patch hosts and add an outer VM/container boundary where required. |
 | macOS resource exhaustion | The Sage six-limit resource contract is not implemented on macOS. | Add enforceable CPU, memory, PID, wall-time, disk, and output controls with receipts. |
 | Linux egress unavailable | Contained direct agents cannot use approved network destinations on Linux. | Implement an authenticated proxy transport into the network namespace. |
-| Direct-write authorization absent | A remote start cannot safely grant retained writes to host paths. | Require a distinct authenticated local-consent record bound to the plan and session. |
+| Retained-change apply disabled | The local atomic/recovery primitive is not a production authorization boundary by itself. | Keep capability `0` until the independent Ed25519 helper/verifier, local RPC/audit path, startup sweep, host-space policy, and Sage-to-parent isolation are configured and tested. |
 | Bundle expansion absent | A verified bundle file is not yet converted into harness-native prompt context. | Add bounded, format-aware extraction and receipt-bound launch inputs. |
 | Dependency or compiler compromise | Build-time code or toolchain compromise can alter enforcement. | Pin dependencies by immutable digest, verify releases, and use reproducible builds. |
 | Protocol parser defects | Malformed input may expose untested parser behavior. | Add fuzz targets and a maintained adversarial corpus. |
@@ -80,7 +80,7 @@ Before enabling an agent, record:
 4. Is network access denied or restricted to exact destinations?
 5. Are audit and control files inaccessible to the agent and other principals?
 6. Are all advertised resource controls enforced on the selected backend?
-7. Is direct-write authority absent or backed by an independent local approval?
+7. Are live host writes absent, and is any future change apply independently authorized?
 8. Is the host patched and, where needed, enclosed by a stronger VM boundary?
 
 Remote Sage launch should remain gated whenever any mandatory capability or

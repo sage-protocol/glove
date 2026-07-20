@@ -157,6 +157,14 @@ add_executable(supervisor_path_alias_test supervisor/path_alias_test.cpp)
 target_link_libraries(supervisor_path_alias_test PRIVATE glove_kernel)
 add_test(NAME supervisor_path_alias COMMAND supervisor_path_alias_test)
 
+add_executable(supervisor_path_exposure_test supervisor/path_exposure_test.cpp)
+target_link_libraries(supervisor_path_exposure_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_path_exposure COMMAND supervisor_path_exposure_test)
+
+add_executable(supervisor_path_exposure_journal_test supervisor/path_exposure_journal_test.cpp)
+target_link_libraries(supervisor_path_exposure_journal_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_path_exposure_journal COMMAND supervisor_path_exposure_journal_test)
+
 add_executable(supervisor_session_plan_test supervisor/session_plan_test.cpp)
 target_link_libraries(supervisor_session_plan_test PRIVATE glove_supervisor)
 add_test(NAME supervisor_session_plan COMMAND supervisor_session_plan_test)
@@ -164,6 +172,50 @@ add_test(NAME supervisor_session_plan COMMAND supervisor_session_plan_test)
 add_executable(supervisor_library_bundle_test supervisor/library_bundle_test.cpp)
 target_link_libraries(supervisor_library_bundle_test PRIVATE glove_supervisor)
 add_test(NAME supervisor_library_bundle COMMAND supervisor_library_bundle_test)
+
+add_executable(supervisor_change_manifest_test supervisor/change_manifest_test.cpp)
+target_link_libraries(supervisor_change_manifest_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_change_manifest COMMAND supervisor_change_manifest_test)
+
+add_executable(
+    supervisor_change_apply_authorization_test
+    supervisor/change_apply_authorization_test.cpp
+)
+target_link_libraries(supervisor_change_apply_authorization_test PRIVATE glove_supervisor)
+add_test(
+    NAME supervisor_change_apply_authorization
+    COMMAND supervisor_change_apply_authorization_test
+)
+
+add_executable(supervisor_change_apply_journal_test supervisor/change_apply_journal_test.cpp)
+target_link_libraries(supervisor_change_apply_journal_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_change_apply_journal COMMAND supervisor_change_apply_journal_test)
+
+add_executable(
+    supervisor_change_apply_trust_policy_test
+    supervisor/change_apply_trust_policy_test.cpp
+)
+target_link_libraries(supervisor_change_apply_trust_policy_test PRIVATE glove_supervisor)
+add_test(
+    NAME supervisor_change_apply_trust_policy
+    COMMAND supervisor_change_apply_trust_policy_test
+)
+
+add_executable(supervisor_change_apply_recovery_test supervisor/change_apply_recovery_test.cpp)
+target_link_libraries(supervisor_change_apply_recovery_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_change_apply_recovery COMMAND supervisor_change_apply_recovery_test)
+
+add_executable(supervisor_change_apply_gate_test supervisor/change_apply_gate_test.cpp)
+target_link_libraries(supervisor_change_apply_gate_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_change_apply_gate COMMAND supervisor_change_apply_gate_test)
+
+add_executable(supervisor_change_apply_exchange_test supervisor/change_apply_exchange_test.cpp)
+target_link_libraries(supervisor_change_apply_exchange_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_change_apply_exchange COMMAND supervisor_change_apply_exchange_test)
+
+add_executable(supervisor_change_apply_receipt_test supervisor/change_apply_receipt_test.cpp)
+target_link_libraries(supervisor_change_apply_receipt_test PRIVATE glove_supervisor)
+add_test(NAME supervisor_change_apply_receipt COMMAND supervisor_change_apply_receipt_test)
 
 add_executable(kernel_registry_test kernel/registry_test.cpp)
 target_link_libraries(kernel_registry_test PRIVATE glove_kernel)
