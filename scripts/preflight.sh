@@ -80,7 +80,7 @@ else
         tidy_extra=()
         if [[ "$(uname -s)" == "Darwin" ]] && command -v xcrun >/dev/null; then
             sdk="$(xcrun --show-sdk-path)"
-            tidy_extra=(--extra-arg-before="-isysroot${sdk}")
+            tidy_extra=(-extra-arg-before="-isysroot${sdk}")
         fi
         # Lint only translation units represented by the active CMake compile
         # database. Headers are still analyzed through their owning sources,
@@ -116,7 +116,17 @@ PY
         if [[ ${#tidy_files[@]} -eq 0 ]]; then
             fail "compile database contains no project translation units"
         fi
-        "${tidy_bin}" -p build/dev "${tidy_extra[@]}" "${tidy_files[@]}"
+        tidy_runner="$(dirname "${tidy_bin}")/run-clang-tidy"
+        if [[ ! -x "${tidy_runner}" ]]; then
+            tidy_runner="$(dirname "${tidy_bin}")/run-clang-tidy.py"
+        fi
+        if [[ ! -x "${tidy_runner}" ]]; then
+            fail "run-clang-tidy not installed alongside ${tidy_bin}"
+        fi
+        # Two workers keep memory bounded on hosted runners while reducing the
+        # full Linux translation-unit pass from timeout-scale wall-clock time.
+        "${tidy_runner}" -j 2 -quiet -p build/dev -clang-tidy-binary "${tidy_bin}" \
+            "${tidy_extra[@]}" "${tidy_files[@]}"
         ok "tidy clean (${tidy_bin})"
     fi
 fi
